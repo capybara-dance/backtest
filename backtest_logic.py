@@ -90,7 +90,21 @@ def get_monthly_contribution_dates(index):
     return set(contrib.dropna())
 
 
-def run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq):
+def _apply_dividend_reinvestment(shares, symbols, divs, prices):
+    """Reinvest dividends by buying additional shares of the same symbol.
+
+    For each symbol, if a dividend per share was paid on this date, the total
+    dividend cash (shares * dividend_per_share) is immediately used to purchase
+    additional shares at the current closing price.
+    """
+    for s in symbols:
+        div_per_share = divs.get(s, 0.0)
+        if div_per_share > 0 and prices[s] > 0:
+            shares[s] += shares[s] * div_per_share / prices[s]
+
+
+def run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq,
+                 dividend_df=None, reinvest_dividends=True):
     symbols = list(price_df.columns)
     w = {s: weights.get(s, 0.0) for s in symbols}
 
@@ -111,6 +125,10 @@ def run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq):
                     s: total_val * w[s] / prices[s] if prices[s] > 0 else shares[s]
                     for s in symbols
                 }
+
+        if reinvest_dividends and dividend_df is not None and dt in dividend_df.index:
+            _apply_dividend_reinvestment(shares, symbols, dividend_df.loc[dt], prices)
+
         values.append(sum(shares[s] * prices[s] for s in symbols))
 
     portfolio = pd.Series(values, index=price_df.index)
@@ -118,7 +136,8 @@ def run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq):
     return portfolio, invested
 
 
-def run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq):
+def run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq,
+            dividend_df=None, reinvest_dividends=True):
     symbols = list(price_df.columns)
     w = {s: weights.get(s, 0.0) for s in symbols}
 
@@ -139,6 +158,9 @@ def run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq):
                     s: total_val * w[s] / prices[s] if prices[s] > 0 else shares[s]
                     for s in symbols
                 }
+
+        if reinvest_dividends and dividend_df is not None and dt in dividend_df.index:
+            _apply_dividend_reinvestment(shares, symbols, dividend_df.loc[dt], prices)
 
         if dt in contrib_dates:
             for s in symbols:
@@ -165,6 +187,30 @@ def build_price_df(ticker_data, bt_start, bt_end):
     return price_df_full, price_df
 
 
+def build_dividend_df(ticker_data, bt_start, bt_end):
+    """Align dividend amounts across symbols and slice to selected period.
+
+    Returns a DataFrame with the same index as price_df where each cell
+    contains the dividend-per-share paid on that date (0 when none).
+    """
+    div_frames = {}
+    for s, data in ticker_data.items():
+        df = data["df"]
+        if "Dividends" in df.columns:
+            div_frames[s] = df["Dividends"]
+        else:
+            div_frames[s] = pd.Series(0.0, index=df.index)
+
+    dividend_df = pd.DataFrame(div_frames).fillna(0.0)
+
+    bt_start_ts = pd.Timestamp(bt_start)
+    bt_end_ts = pd.Timestamp(bt_end)
+    dividend_df = dividend_df.loc[
+        (dividend_df.index >= bt_start_ts) & (dividend_df.index <= bt_end_ts)
+    ]
+    return dividend_df
+
+
 def get_unique_currencies(ticker_data):
     currencies = {s: data["info"].get("currency", "") for s, data in ticker_data.items()}
     return set(v for v in currencies.values() if v)
@@ -178,10 +224,13 @@ def build_plot_price_df(price_df, normalize):
     return plot_price_df
 
 
-def run_backtest(price_df, invest_type, initial_amount, monthly_amount, weights, rebalance, rebalance_freq):
+def run_backtest(price_df, invest_type, initial_amount, monthly_amount, weights, rebalance, rebalance_freq,
+                 dividend_df=None, reinvest_dividends=True):
     if invest_type == "거치식":
-        return run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq)
-    return run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq)
+        return run_lump_sum(price_df, initial_amount, weights, rebalance, rebalance_freq,
+                            dividend_df=dividend_df, reinvest_dividends=reinvest_dividends)
+    return run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq,
+                   dividend_df=dividend_df, reinvest_dividends=reinvest_dividends)
 
 
 def trim_leading_zeros(portfolio, invested):
@@ -250,6 +299,7 @@ def build_html_report(
         monthly_amount,
         rebalance,
         rebalance_freq,
+        reinvest_dividends,
         normalize_price_chart,
         unique_currencies,
         metrics,
@@ -279,6 +329,7 @@ def build_html_report(
                 ("초기 투자금", f"₩{initial_amount:,.0f}" if invest_type == "거치식" else "해당 없음"),
                 ("월 투자금", f"₩{monthly_amount:,.0f}" if invest_type == "적립식" else "해당 없음"),
                 ("리밸런싱", rebalance_desc),
+                ("배당 재투자", "적용" if reinvest_dividends else "미적용"),
                 ("종가 비교 정규화", "ON (시작값=100)" if normalize_price_chart else "OFF"),
                 ("통화", currency_desc),
         ]

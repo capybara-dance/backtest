@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from math import isnan
 
 from backtest_logic import (
+    build_dividend_df,
     build_plot_price_df,
     build_price_df,
     build_html_report,
@@ -176,7 +177,15 @@ with st.sidebar:
     rebalance = st.checkbox("리밸런싱 적용", value=False)
     rebalance_freq = st.selectbox("리밸런싱 주기", ["월별", "분기별", "연간"]) if rebalance else None
 
+    st.subheader("💰 배당 재투자")
+    reinvest_dividends = st.checkbox(
+        "배당 재투자 적용",
+        value=True,
+        help="활성화하면 배당 발생 시 배당금 전액을 해당 종목에 즉시 재투자합니다.",
+    )
+
 price_df_full, price_df = build_price_df(ticker_data, bt_start, bt_end)
+dividend_df = build_dividend_df(ticker_data, bt_start, bt_end)
 
 if price_df_full.empty:
     st.error("선택한 종목들 사이에 겹치는 거래일이 없습니다.")
@@ -237,6 +246,8 @@ portfolio, invested = run_backtest(
     weights,
     rebalance,
     rebalance_freq,
+    dividend_df=dividend_df,
+    reinvest_dividends=reinvest_dividends,
 )
 
 portfolio, invested = trim_leading_zeros(portfolio, invested)
@@ -316,6 +327,7 @@ report_html = build_html_report(
     monthly_amount=monthly_amount,
     rebalance=rebalance,
     rebalance_freq=rebalance_freq,
+    reinvest_dividends=reinvest_dividends,
     normalize_price_chart=normalize_price_chart,
     unique_currencies=unique_currencies,
     metrics=metrics,
