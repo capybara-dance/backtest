@@ -1,4 +1,5 @@
 import plotly.graph_objects as go
+from plotly.colors import qualitative
 import streamlit as st
 from datetime import date, timedelta
 from math import isnan
@@ -6,6 +7,7 @@ from math import isnan
 from backtest_logic import (
     build_plot_price_df,
     build_price_df,
+    build_html_report,
     compute_date_bounds,
     compute_performance_metrics,
     fetch_ticker_data,
@@ -158,7 +160,8 @@ normalize_price_chart = st.checkbox(
 plot_price_df = build_plot_price_df(price_df, normalize_price_chart)
 
 fig_price = go.Figure()
-for symbol, data in ticker_data.items():
+palette = qualitative.Plotly
+for i, (symbol, data) in enumerate(ticker_data.items()):
     info = data["info"]
     label = info.get("longName") or info.get("shortName") or symbol
     fig_price.add_trace(
@@ -167,7 +170,7 @@ for symbol, data in ticker_data.items():
             y=plot_price_df[symbol].values,
             mode="lines",
             name=f"{label} ({symbol})",
-            line=dict(width=1.5),
+            line=dict(width=2, color=palette[i % len(palette)]),
         )
     )
 
@@ -252,3 +255,29 @@ fig_bt.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 st.plotly_chart(fig_bt, use_container_width=True)
+
+fig_price_html = fig_price.to_html(full_html=False, include_plotlyjs="cdn")
+fig_bt_html = fig_bt.to_html(full_html=False, include_plotlyjs=False)
+report_html = build_html_report(
+    actual_start=actual_start,
+    actual_end=actual_end,
+    tickers=tickers,
+    weights=weights,
+    invest_type=invest_type,
+    initial_amount=initial_amount,
+    monthly_amount=monthly_amount,
+    rebalance=rebalance,
+    rebalance_freq=rebalance_freq,
+    normalize_price_chart=normalize_price_chart,
+    unique_currencies=unique_currencies,
+    metrics=metrics,
+    fig_price_html=fig_price_html,
+    fig_bt_html=fig_bt_html,
+)
+
+st.download_button(
+    label="📄 HTML 리포트 다운로드",
+    data=report_html.encode("utf-8"),
+    file_name=f"capybara_backtest_report_{actual_end}.html",
+    mime="text/html",
+)

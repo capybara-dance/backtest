@@ -1,4 +1,5 @@
 from datetime import date
+from html import escape
 
 import numpy as np
 import pandas as pd
@@ -225,3 +226,136 @@ def compute_performance_metrics(portfolio, invested, invest_type, initial_amount
         "cagr_label": cagr_label,
         "mdd_pct": mdd_pct,
     }
+
+
+def _fmt_pct(value):
+        if pd.isna(value):
+                return "N/A"
+        return f"{value:+.2f}%"
+
+
+def _fmt_num(value):
+        if pd.isna(value):
+                return "N/A"
+        return f"{value:,.0f}"
+
+
+def build_html_report(
+        actual_start,
+        actual_end,
+        tickers,
+        weights,
+        invest_type,
+        initial_amount,
+        monthly_amount,
+        rebalance,
+        rebalance_freq,
+        normalize_price_chart,
+        unique_currencies,
+        metrics,
+        fig_price_html,
+        fig_bt_html,
+):
+        """Build a standalone HTML report for the current backtest run."""
+        strategy_desc = (
+                "거치식 전략: 시작 시점에 목표 비중대로 일괄 매수하고, 선택 시 리밸런싱 주기에 맞춰 비중을 재조정합니다."
+                if invest_type == "거치식"
+                else "적립식 전략: 매월 첫 거래일에 월 투자금을 목표 비중대로 분할 매수하고, 선택 시 리밸런싱을 수행합니다."
+        )
+
+        rebalance_desc = "미적용"
+        if rebalance:
+                rebalance_desc = f"적용 ({rebalance_freq})"
+
+        currency_desc = ", ".join(sorted(unique_currencies)) if unique_currencies else "정보 없음"
+        weights_rows = "".join(
+                f"<tr><td>{escape(symbol)}</td><td>{weights.get(symbol, 0.0) * 100:.2f}%</td></tr>"
+                for symbol in tickers
+        )
+
+        config_rows = [
+                ("백테스트 기간", f"{actual_start} ~ {actual_end}"),
+                ("투자 방식", invest_type),
+                ("초기 투자금", f"₩{initial_amount:,.0f}" if invest_type == "거치식" else "해당 없음"),
+                ("월 투자금", f"₩{monthly_amount:,.0f}" if invest_type == "적립식" else "해당 없음"),
+                ("리밸런싱", rebalance_desc),
+                ("종가 비교 정규화", "ON (시작값=100)" if normalize_price_chart else "OFF"),
+                ("통화", currency_desc),
+        ]
+
+        config_table_rows = "".join(
+                f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>" for k, v in config_rows
+        )
+
+        result_rows = [
+                ("총 투자금", f"₩{_fmt_num(metrics['total_invested_amount'])}"),
+                ("최종 평가액", f"₩{_fmt_num(metrics['final_value'])}"),
+                ("총 수익률", _fmt_pct(metrics["total_return_pct"])),
+                (metrics["cagr_label"], _fmt_pct(metrics["cagr_pct"])),
+                ("최대 낙폭 (MDD)", _fmt_pct(metrics["mdd_pct"])),
+        ]
+
+        result_table_rows = "".join(
+                f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>" for k, v in result_rows
+        )
+
+        return f"""<!doctype html>
+<html lang=\"ko\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Capybara Backtest Report</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2937; }}
+        h1, h2 {{ margin: 0 0 12px 0; }}
+        .section {{ margin-top: 28px; }}
+        .card {{ background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 8px; }}
+        th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: left; }}
+        th {{ background: #f3f4f6; width: 260px; }}
+        .muted {{ color: #6b7280; }}
+    </style>
+</head>
+<body>
+    <h1>Capybara Backtest Report</h1>
+    <p class=\"muted\">대상 종목: {escape(', '.join(tickers))}</p>
+
+    <div class=\"section\">
+        <h2>전략 설명</h2>
+        <div class=\"card\">{escape(strategy_desc)}</div>
+    </div>
+
+    <div class=\"section\">
+        <h2>적용된 설정</h2>
+        <table>
+            {config_table_rows}
+        </table>
+    </div>
+
+    <div class=\"section\">
+        <h2>종목별 비중</h2>
+        <table>
+            <tr><th>종목</th><th>비중</th></tr>
+            {weights_rows}
+        </table>
+    </div>
+
+    <div class=\"section\">
+        <h2>결과 요약</h2>
+        <table>
+            {result_table_rows}
+        </table>
+    </div>
+
+    <div class=\"section\">
+        <h2>종가 비교 차트</h2>
+        {fig_price_html}
+    </div>
+
+    <div class=\"section\">
+        <h2>포트폴리오 백테스트 차트</h2>
+        {fig_bt_html}
+    </div>
+</body>
+</html>
+"""
