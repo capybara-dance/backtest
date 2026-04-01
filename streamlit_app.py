@@ -8,7 +8,7 @@ from datetime import date, timedelta
 st.set_page_config(page_title="주가 백테스트", page_icon="📈", layout="wide")
 
 st.title("📈 주가 백테스트")
-st.write("여러 종목을 입력하고, 투자 방식·비중·리밸런싱 설정을 통해 포트폴리오 백테스트를 실행하세요.")
+st.write("여러 종목을 입력하고, 투자 방식·기간·비중·리밸런싱 설정을 통해 포트폴리오 백테스트를 실행하세요.")
 
 # ============================================================
 # Ticker input
@@ -26,8 +26,9 @@ tickers = list(dict.fromkeys(
 if not tickers:
     st.stop()
 
-end_date = date.today()
-start_date = end_date - timedelta(days=365 * 10)
+# Always fetch max 10 years of raw data so the user can pick any sub-range
+_fetch_end = date.today()
+_fetch_start = _fetch_end - timedelta(days=365 * 10)
 
 # ============================================================
 # Data fetch
@@ -39,7 +40,7 @@ with st.spinner(f"{', '.join(tickers)} 데이터를 불러오는 중..."):
     for symbol in tickers:
         try:
             ticker_obj = yf.Ticker(symbol)
-            df = ticker_obj.history(start=start_date, end=end_date)
+            df = ticker_obj.history(start=_fetch_start, end=_fetch_end)
             if df.empty:
                 failed.append((symbol, "데이터 없음"))
                 continue
@@ -58,6 +59,30 @@ for symbol, reason in failed:
 
 if not ticker_data:
     st.stop()
+
+# ============================================================
+# Compute default date bounds from fetched data
+# ============================================================
+# Filter out any NaT entries before calling .date()
+def _safe_date(ts):
+    return ts.date() if not pd.isnull(ts) else None
+
+# Start = latest of all tickers' first available date (ensures all tickers have data)
+data_start_default = max(
+    _safe_date(data["df"].index[0]) for data in ticker_data.values()
+    if not data["df"].empty and _safe_date(data["df"].index[0]) is not None
+)
+data_end_default = date.today()
+# Earliest possible start = the oldest first date across tickers
+data_start_min = min(
+    _safe_date(data["df"].index[0]) for data in ticker_data.values()
+    if not data["df"].empty and _safe_date(data["df"].index[0]) is not None
+)
+# Latest possible end = most recent date available in fetched data
+data_end_max = max(
+    _safe_date(data["df"].index[-1]) for data in ticker_data.values()
+    if not data["df"].empty and _safe_date(data["df"].index[-1]) is not None
+)
 
 # ============================================================
 # Sidebar: investment parameters
@@ -87,6 +112,23 @@ with st.sidebar:
             format="%d",
         )
         initial_amount = 0
+
+    st.subheader("📅 백테스트 기간")
+    bt_start = st.date_input(
+        "시작 날짜",
+        value=data_start_default,
+        min_value=data_start_min,
+        max_value=data_end_max,
+    )
+    bt_end = st.date_input(
+        "종료 날짜",
+        value=data_end_default,
+        min_value=data_start_min + timedelta(days=1),
+        max_value=data_end_max,
+    )
+    if bt_start >= bt_end:
+        st.error("시작 날짜는 종료 날짜보다 앞이어야 합니다.")
+        st.stop()
 
     st.subheader("📊 종목별 투자 비중 (%)")
     n = len(ticker_data)
@@ -216,13 +258,24 @@ def run_dca(price_df, monthly_amount, weights, rebalance, rebalance_freq):
 
 
 # ============================================================
-# Align price data across tickers
+# Align & filter price data to user-selected date range
 # ============================================================
-price_df = pd.DataFrame({s: data["df"]["Close"] for s, data in ticker_data.items()})
-price_df = price_df.ffill().dropna()
+price_df_full = pd.DataFrame({s: data["df"]["Close"] for s, data in ticker_data.items()})
+price_df_full = price_df_full.ffill().dropna()
+
+if price_df_full.empty:
+    st.error("선택한 종목들 사이에 겹치는 거래일이 없습니다.")
+    st.stop()
+
+# Slice to user-selected backtest window
+bt_start_ts = pd.Timestamp(bt_start)
+bt_end_ts = pd.Timestamp(bt_end)
+price_df = price_df_full.loc[
+    (price_df_full.index >= bt_start_ts) & (price_df_full.index <= bt_end_ts)
+]
 
 if price_df.empty:
-    st.error("선택한 종목들 사이에 겹치는 거래일이 없습니다.")
+    st.error("선택한 기간에 해당하는 거래일 데이터가 없습니다. 기간을 조정해 주세요.")
     st.stop()
 
 # Warn if currencies differ (prices are not directly comparable)
@@ -235,18 +288,21 @@ if len(unique_currencies) > 1:
     )
 
 # ============================================================
-# Price chart
+# Price chart (filtered to backtest period)
 # ============================================================
-st.subheader("📈 종가 비교 차트 (최근 10년)")
+actual_start = price_df.index[0].date()
+actual_end = price_df.index[-1].date()
+st.subheader(f"📈 종가 비교 차트 ({actual_start} ~ {actual_end})")
 fig_price = go.Figure()
 for symbol, data in ticker_data.items():
-    df = data["df"]
+    df_slice = data["df"]["Close"]
+    df_slice = df_slice[(df_slice.index >= bt_start_ts) & (df_slice.index <= bt_end_ts)]
     info = data["info"]
     label = info.get("longName") or info.get("shortName") or symbol
     fig_price.add_trace(
         go.Scatter(
-            x=df.index,
-            y=df["Close"],
+            x=df_slice.index,
+            y=df_slice.values,
             mode="lines",
             name=f"{label} ({symbol})",
             line=dict(width=1.5),
@@ -301,6 +357,12 @@ col3.metric("총 수익률", f"{total_return_pct:+.2f}%" if not np.isnan(total_r
 col4.metric(cagr_label, f"{cagr_pct:+.2f}%" if not np.isnan(cagr_pct) else "N/A")
 col5.metric("최대 낙폭 (MDD)", f"{mdd_pct:.2f}%")
 
+if invest_type == "적립식":
+    st.caption(
+        "ℹ️ 적립식 CAGR은 첫 달 투자금을 기준으로 한 근사값입니다. "
+        "정확한 수익률은 내부수익률(IRR) 방식으로 계산해야 합니다."
+    )
+
 fig_bt = go.Figure()
 fig_bt.add_trace(go.Scatter(
     x=portfolio.index,
@@ -335,9 +397,10 @@ with st.expander("📐 적용된 투자 비중"):
     st.dataframe(w_df, use_container_width=True, hide_index=True)
 
 # ============================================================
-# Per-ticker details
+# Per-ticker details (scoped to selected date range)
 # ============================================================
 st.subheader("📊 종목별 상세 정보")
+period_label = f"{actual_start} ~ {actual_end}"
 tabs = st.tabs(list(ticker_data.keys()))
 for tab, (symbol, data) in zip(tabs, ticker_data.items()):
     with tab:
@@ -346,22 +409,28 @@ for tab, (symbol, data) in zip(tabs, ticker_data.items()):
         company_name = info.get("longName") or info.get("shortName") or symbol
         currency = info.get("currency", "")
 
+        # Slice to backtest period
+        df_period = df[(df.index >= bt_start_ts) & (df.index <= bt_end_ts)]
+        if df_period.empty:
+            st.warning(f"{symbol}: 선택한 기간에 데이터가 없습니다.")
+            continue
+
         st.markdown(f"**{company_name}** ({symbol})")
 
-        close = df["Close"]
+        close = df_period["Close"]
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("조회 기간", f"{df.index[0].date()} ~ {df.index[-1].date()}")
-        col2.metric("거래일 수", f"{len(df):,}일")
+        col1.metric("조회 기간", period_label)
+        col2.metric("거래일 수", f"{len(df_period):,}일")
         col3.metric("최고 종가", f"{close.max():,.2f} {currency}")
         col4.metric("최저 종가", f"{close.min():,.2f} {currency}")
 
         col5, col6, col7, col8 = st.columns(4)
-        total_return_ticker = (
+        ticker_return = (
             (close.iloc[-1] / close.iloc[0] - 1) * 100 if close.iloc[0] > 0 else float("nan")
         )
         col5.metric("시작 종가", f"{close.iloc[0]:,.2f} {currency}")
         col6.metric("최근 종가", f"{close.iloc[-1]:,.2f} {currency}")
-        col7.metric("10년 수익률", f"{total_return_ticker:+.2f}%" if not pd.isna(total_return_ticker) else "N/A")
+        col7.metric("기간 수익률", f"{ticker_return:+.2f}%" if not pd.isna(ticker_return) else "N/A")
         col8.metric("평균 종가", f"{close.mean():,.2f} {currency}")
 
         st.markdown("**📋 기초 통계**")
@@ -383,7 +452,7 @@ for tab, (symbol, data) in zip(tabs, ticker_data.items()):
 
         with st.expander("원본 데이터 보기"):
             st.dataframe(
-                df[["Open", "High", "Low", "Close", "Volume"]].sort_index(ascending=False),
+                df_period[["Open", "High", "Low", "Close", "Volume"]].sort_index(ascending=False),
                 use_container_width=True,
             )
 
