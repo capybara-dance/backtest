@@ -18,9 +18,9 @@ from backtest_logic import (
     trim_leading_zeros,
 )
 
-st.set_page_config(page_title="Capybara Backtest", page_icon="🦫", layout="wide")
+st.set_page_config(page_title="Capybara Backtest", layout="wide")
 
-st.title("Capybara Backtest 🦫")
+st.title("Capybara Backtest")
 st.write("여러 종목을 입력하고, 투자 방식·기간·비중·리밸런싱 설정을 통해 포트폴리오 백테스트를 실행하세요.")
 
 raw_input = st.text_input(
@@ -31,6 +31,8 @@ raw_input = st.text_input(
 tickers = parse_tickers(raw_input)
 if not tickers:
     st.stop()
+
+    
 
 fetch_end = date.today()
 fetch_start = fetch_end - timedelta(days=365 * 10)
@@ -50,6 +52,21 @@ if not ticker_data:
     data_end_max,
     data_end_default,
 ) = compute_date_bounds(ticker_data)
+
+current_symbols = tuple(ticker_data.keys())
+prev_period_symbols = st.session_state.get("period_symbols")
+if prev_period_symbols != current_symbols:
+    st.session_state["bt_start"] = data_start_default
+    st.session_state["bt_end"] = data_end_default
+    st.session_state["period_symbols"] = current_symbols
+
+if "bt_start" not in st.session_state:
+    st.session_state["bt_start"] = data_start_default
+if "bt_end" not in st.session_state:
+    st.session_state["bt_end"] = data_end_default
+
+st.session_state["bt_start"] = min(max(st.session_state["bt_start"], data_start_min), data_end_max)
+st.session_state["bt_end"] = min(max(st.session_state["bt_end"], data_start_min + timedelta(days=1)), data_end_max)
 
 with st.sidebar:
     st.header("⚙️ 투자 설정")
@@ -80,14 +97,17 @@ with st.sidebar:
     st.subheader("📅 백테스트 기간")
     bt_start = st.date_input(
         "시작 날짜",
-        value=data_start_default,
+        key="bt_start",
         min_value=data_start_min,
         max_value=data_end_max,
     )
+    end_min = max(data_start_min + timedelta(days=1), bt_start + timedelta(days=1))
+    if st.session_state["bt_end"] < end_min:
+        st.session_state["bt_end"] = end_min
     bt_end = st.date_input(
         "종료 날짜",
-        value=data_end_default,
-        min_value=data_start_min + timedelta(days=1),
+        key="bt_end",
+        min_value=end_min,
         max_value=data_end_max,
     )
     if bt_start >= bt_end:
