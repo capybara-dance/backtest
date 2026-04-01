@@ -20,8 +20,35 @@ from backtest_logic import (
 
 st.set_page_config(page_title="Capybara Backtest", layout="wide")
 
+st.markdown(
+    """
+    <style>
+      @media (max-width: 768px) {
+        .block-container {
+          padding-top: 1rem;
+          padding-left: 0.8rem;
+          padding-right: 0.8rem;
+          padding-bottom: 1rem;
+        }
+        h1 {
+          font-size: 1.55rem !important;
+          line-height: 1.25 !important;
+        }
+        div[data-testid="stMetricValue"] {
+          font-size: 1.2rem !important;
+        }
+        div[data-testid="stMetricLabel"] {
+          font-size: 0.85rem !important;
+        }
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("Capybara Backtest")
 st.write("여러 종목을 입력하고, 투자 방식·기간·비중·리밸런싱 설정을 통해 포트폴리오 백테스트를 실행하세요.")
+st.caption("모바일에서는 좌상단 메뉴에서 사이드바를 열어 투자 설정을 바꿀 수 있습니다.")
 
 raw_input = st.text_input(
     "티커 심볼 입력 (쉼표로 구분, 예: AAPL, MSFT, 005930.KS)",
@@ -31,8 +58,6 @@ raw_input = st.text_input(
 tickers = parse_tickers(raw_input)
 if not tickers:
     st.stop()
-
-    
 
 fetch_end = date.today()
 fetch_start = fetch_end - timedelta(days=365 * 10)
@@ -198,7 +223,7 @@ fig_price.update_layout(
     xaxis_title="날짜",
     yaxis_title="정규화 지수 (시작값=100)" if normalize_price_chart else "종가",
     hovermode="x unified",
-    height=450,
+    height=380,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 st.plotly_chart(fig_price, use_container_width=True)
@@ -227,18 +252,21 @@ metrics = compute_performance_metrics(
     monthly_amount,
 )
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("총 투자금", f"₩{metrics['total_invested_amount']:,.0f}")
-col2.metric("최종 평가액", f"₩{metrics['final_value']:,.0f}")
-col3.metric(
+row1_col1, row1_col2 = st.columns(2)
+row1_col1.metric("총 투자금", f"₩{metrics['total_invested_amount']:,.0f}")
+row1_col2.metric("최종 평가액", f"₩{metrics['final_value']:,.0f}")
+
+row2_col1, row2_col2 = st.columns(2)
+row2_col1.metric(
     "총 수익률",
     f"{metrics['total_return_pct']:+.2f}%" if not isnan(metrics["total_return_pct"]) else "N/A",
 )
-col4.metric(
+row2_col2.metric(
     metrics["cagr_label"],
     f"{metrics['cagr_pct']:+.2f}%" if not isnan(metrics["cagr_pct"]) else "N/A",
 )
-col5.metric("최대 낙폭 (MDD)", f"{metrics['mdd_pct']:.2f}%")
+
+st.metric("최대 낙폭 (MDD)", f"{metrics['mdd_pct']:.2f}%")
 
 if invest_type == "적립식":
     st.caption(
@@ -271,7 +299,7 @@ fig_bt.update_layout(
     xaxis_title="날짜",
     yaxis_title="금액 (원)",
     hovermode="x unified",
-    height=450,
+    height=380,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 st.plotly_chart(fig_bt, use_container_width=True)
