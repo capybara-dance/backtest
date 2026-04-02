@@ -39,11 +39,25 @@ RISK_FREE_RATE = 0.03         # 무위험이자율 3%
 MIN_YEARS = 3                 # 최소 백테스트 기간 (년)
 MAX_ETF_PER_PORTFOLIO = 10
 
-# 스코어링 가중치
-W_CAGR = 0.35
-W_MDD = 0.30
-W_SHARPE = 0.20
-W_CALMAR = 0.15
+# 스코어링 가중치 - 투자자 성향별 (CAGR, MDD, Sharpe, Calmar)
+# 중립형: 수익·리스크 균형
+WEIGHTS_NEUTRAL   = dict(cagr=0.35, mdd=0.30, sharpe=0.20, calmar=0.15)
+# 공격형: 수익률 극대화, 손실 허용
+WEIGHTS_AGGRESSIVE = dict(cagr=0.55, mdd=0.10, sharpe=0.20, calmar=0.15)
+# 안정형: 손실 최소화, 꾸준한 성과
+WEIGHTS_CONSERVATIVE = dict(cagr=0.15, mdd=0.50, sharpe=0.25, calmar=0.10)
+
+INVESTOR_PROFILES = {
+    "공격형": WEIGHTS_AGGRESSIVE,
+    "중립형": WEIGHTS_NEUTRAL,
+    "안정형": WEIGHTS_CONSERVATIVE,
+}
+
+# 기본(하위호환) 가중치 = 중립형
+W_CAGR   = WEIGHTS_NEUTRAL["cagr"]
+W_MDD    = WEIGHTS_NEUTRAL["mdd"]
+W_SHARPE = WEIGHTS_NEUTRAL["sharpe"]
+W_CALMAR = WEIGHTS_NEUTRAL["calmar"]
 
 # ─────────────────────────────────────────────
 # 사전 정의된 후보 포트폴리오 (세션 1 탐색 전략)
@@ -1095,23 +1109,37 @@ def percentile_rank(value, series):
 
 
 def compute_scores(history: list) -> list:
-    """전체 history 기반 백분위수 스코어 재계산."""
+    """전체 history 기반 백분위수 스코어 재계산.
+
+    각 레코드에 다음 필드를 추가/갱신합니다:
+      - score          : 중립형 스코어 (하위 호환)
+      - scores.공격형  : 공격형 스코어
+      - scores.안정형  : 안정형 스코어
+      - scores.중립형  : 중립형 스코어
+    """
     if not history:
         return history
 
-    cagrs = [r["metrics"]["cagr_pct"] for r in history]
-    mdds = [-r["metrics"]["mdd_pct"] for r in history]    # mdd는 음수이므로 부호 반전 (낙폭 작을수록 좋음)
+    cagrs   = [r["metrics"]["cagr_pct"] for r in history]
+    mdds    = [-r["metrics"]["mdd_pct"] for r in history]   # 낙폭 작을수록 좋음
     sharpes = [r["metrics"]["sharpe_ratio"] for r in history]
     calmars = [r["metrics"]["calmar_ratio"] for r in history]
 
     for r in history:
-        sc_cagr = percentile_rank(r["metrics"]["cagr_pct"], cagrs)
-        sc_mdd = percentile_rank(-r["metrics"]["mdd_pct"], mdds)
+        sc_cagr   = percentile_rank(r["metrics"]["cagr_pct"], cagrs)
+        sc_mdd    = percentile_rank(-r["metrics"]["mdd_pct"], mdds)
         sc_sharpe = percentile_rank(r["metrics"]["sharpe_ratio"], sharpes)
         sc_calmar = percentile_rank(r["metrics"]["calmar_ratio"], calmars)
-        r["score"] = round(
-            W_CAGR * sc_cagr + W_MDD * sc_mdd + W_SHARPE * sc_sharpe + W_CALMAR * sc_calmar, 2
-        )
+
+        profile_scores = {}
+        for profile, w in INVESTOR_PROFILES.items():
+            profile_scores[profile] = round(
+                w["cagr"] * sc_cagr + w["mdd"] * sc_mdd +
+                w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
+            )
+
+        r["scores"] = profile_scores
+        r["score"]  = profile_scores["중립형"]   # 하위 호환
 
     return history
 
@@ -1238,6 +1266,7 @@ def run_single_backtest(code_weight_list, rebalance, rebalance_freq, turn_id, se
             "years": round(metrics["years"], 2),
         },
         "score": 50.0,  # 나중에 재계산
+        "scores": {"공격형": 50.0, "중립형": 50.0, "안정형": 50.0},  # 나중에 재계산
         "notes": notes,
     }
 
@@ -1246,28 +1275,43 @@ def run_single_backtest(code_weight_list, rebalance, rebalance_freq, turn_id, se
 
 def generate_insights_md(history: list, session: int, session_records: list, date_str: str) -> str:
     """insights MD 문자열 생성."""
-    top_session = sorted(session_records, key=lambda r: r["score"], reverse=True)[:10]
-    top_all = sorted(history, key=lambda r: r["score"], reverse=True)[:10]
-
     def fmt_etfs(rec):
         parts = [f"{e['name']}({e['weight']*100:.0f}%)" for e in rec["portfolio"]["etfs"]]
         return ", ".join(parts)
 
-    def fmt_row(rank, rec):
+    def fmt_row(rank, rec, profile=None):
         rb = rec["portfolio"]["rebalancing"]
         rb_str = f"{rb['frequency']}" if rb["enabled"] else "없음"
+        scores = rec.get("scores", {})
+        if profile:
+            score_val = scores.get(profile, rec["score"])
+        else:
+            score_val = rec["score"]
         return (
             f"| {rank} | {rec['id']} | {fmt_etfs(rec)} | "
             f"{rec['metrics']['cagr_pct']:.2f}% | {rec['metrics']['mdd_pct']:.2f}% | "
-            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {rec['score']:.1f} |"
+            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {score_val:.1f} |"
         )
 
-    session_rows = "\n".join(fmt_row(i + 1, r) for i, r in enumerate(top_session))
-    all_rows = "\n".join(fmt_row(i + 1, r) for i, r in enumerate(top_all))
+    def profile_top_rows(records, profile, n=10):
+        top = sorted(records, key=lambda r: r.get("scores", {}).get(profile, r["score"]), reverse=True)[:n]
+        return "\n".join(fmt_row(i + 1, r, profile) for i, r in enumerate(top)), top
+
+    # 성향별 Top (이번 세션)
+    agg_session_rows,  agg_session_top  = profile_top_rows(session_records, "공격형")
+    neu_session_rows,  neu_session_top  = profile_top_rows(session_records, "중립형")
+    con_session_rows,  con_session_top  = profile_top_rows(session_records, "안정형")
+
+    # 성향별 Top (누적 전체)
+    agg_all_rows, _  = profile_top_rows(history, "공격형")
+    neu_all_rows, _  = profile_top_rows(history, "중립형")
+    con_all_rows, _  = profile_top_rows(history, "안정형")
+
+    # 중립형 기준 이번 세션 Top (인사이트용)
+    top_session = neu_session_top
 
     # 간단한 인사이트 추출
     if top_session:
-        best = top_session[0]
         insights = []
 
         # CAGR 분석
@@ -1294,18 +1338,26 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
                 f"리밸런싱 여부 비교: 리밸런싱 평균 스코어 {avg_score_yes:.1f} vs 비리밸런싱 {avg_score_no:.1f} → {rb_effect}"
             )
 
-        # 상위 포트폴리오 공통 ETF
+        # 상위 포트폴리오 공통 ETF (중립형 기준)
         top3_codes = set()
         for r in top_session[:3]:
             for e in r["portfolio"]["etfs"]:
                 top3_codes.add(e["name"])
         insights.append(
-            f"상위 3개 포트폴리오 구성 ETF: {', '.join(sorted(top3_codes))}"
+            f"중립형 상위 3개 포트폴리오 구성 ETF: {', '.join(sorted(top3_codes))}"
         )
     else:
         insights = ["데이터 부족으로 인사이트 분석 불가"]
 
     insights_text = "\n".join(f"{i + 1}. {ins}" for i, ins in enumerate(insights))
+
+    # 성향별 가중치 설명 텍스트
+    def weight_desc(w):
+        return (f"CAGR {w['cagr']*100:.0f}% / MDD {w['mdd']*100:.0f}% / "
+                f"샤프 {w['sharpe']*100:.0f}% / 칼마 {w['calmar']*100:.0f}%")
+
+    col_header = "| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |"
+    col_sep    = "|-----|----|----------|------|-----|------|---------|--------|"
 
     md = f"""# 연금 ETF 포트폴리오 분석 리포트
 
@@ -1319,23 +1371,60 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
 - 세션 번호: {session}
 - 이번 세션 테스트 수: {len(session_records)}
 - 누적 테스트 수: {len(history)}
-- 스코어링 가중치: CAGR {W_CAGR*100:.0f}% / MDD {W_MDD*100:.0f}% / 샤프 {W_SHARPE*100:.0f}% / 칼마 {W_CALMAR*100:.0f}%
 
 ---
 
-## 이번 세션 Top 포트폴리오
+## 투자자 성향별 스코어링 가중치
 
-| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |
-|-----|----|----------|------|-----|------|---------|--------|
-{session_rows}
+| 성향 | CAGR | MDD | 샤프 | 칼마 | 특징 |
+|------|------|-----|------|------|------|
+| 🚀 공격형 | {WEIGHTS_AGGRESSIVE['cagr']*100:.0f}% | {WEIGHTS_AGGRESSIVE['mdd']*100:.0f}% | {WEIGHTS_AGGRESSIVE['sharpe']*100:.0f}% | {WEIGHTS_AGGRESSIVE['calmar']*100:.0f}% | 수익률 극대화, 손실 허용 |
+| ⚖️ 중립형 | {WEIGHTS_NEUTRAL['cagr']*100:.0f}% | {WEIGHTS_NEUTRAL['mdd']*100:.0f}% | {WEIGHTS_NEUTRAL['sharpe']*100:.0f}% | {WEIGHTS_NEUTRAL['calmar']*100:.0f}% | 수익·리스크 균형 |
+| 🛡️ 안정형 | {WEIGHTS_CONSERVATIVE['cagr']*100:.0f}% | {WEIGHTS_CONSERVATIVE['mdd']*100:.0f}% | {WEIGHTS_CONSERVATIVE['sharpe']*100:.0f}% | {WEIGHTS_CONSERVATIVE['calmar']*100:.0f}% | 손실 최소화, 꾸준한 성과 |
 
 ---
 
-## 누적 전체 Top 포트폴리오
+## 이번 세션 Top 포트폴리오 (성향별)
 
-| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |
-|-----|----|----------|------|-----|------|---------|--------|
-{all_rows}
+### 🚀 공격형
+
+{col_header}
+{col_sep}
+{agg_session_rows}
+
+### ⚖️ 중립형
+
+{col_header}
+{col_sep}
+{neu_session_rows}
+
+### 🛡️ 안정형
+
+{col_header}
+{col_sep}
+{con_session_rows}
+
+---
+
+## 누적 전체 Top 포트폴리오 (성향별)
+
+### 🚀 공격형
+
+{col_header}
+{col_sep}
+{agg_all_rows}
+
+### ⚖️ 중립형
+
+{col_header}
+{col_sep}
+{neu_all_rows}
+
+### 🛡️ 안정형
+
+{col_header}
+{col_sep}
+{con_all_rows}
 
 ---
 
@@ -1352,11 +1441,6 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
 - [ ] 채권 비중을 10%~50% 범위로 세분화한 변형 탐색
 - [ ] 해외 채권 ETF (미국채, 하이일드) 혼합 전략 탐색
 - [ ] 배당 ETF 위주 인컴형 포트폴리오 탐색
-
-## 스코어링 가중치 현황
-
-현재: CAGR {W_CAGR*100:.0f}% / MDD {W_MDD*100:.0f}% / 샤프 {W_SHARPE*100:.0f}% / 칼마 {W_CALMAR*100:.0f}%  
-비고: 세션 1은 초기 기준선 수집이므로 가중치 변경 유보. 세션 2부터 조정 검토.
 """
     return md
 
@@ -1466,9 +1550,11 @@ def main():
         save_history(history)
 
         m = record["metrics"]
+        scores = record.get("scores", {})
         print(
             f"  → CAGR: {m['cagr_pct']:.2f}%  MDD: {m['mdd_pct']:.2f}%  "
-            f"샤프: {m.get('sharpe_ratio') or 'N/A'}  스코어: {record['score']:.1f}  "
+            f"샤프: {m.get('sharpe_ratio') or 'N/A'}  "
+            f"스코어 [공격:{scores.get('공격형', record['score']):.1f} / 중립:{scores.get('중립형', record['score']):.1f} / 안정:{scores.get('안정형', record['score']):.1f}]  "
             f"기간: {record['backtest']['start_date']} ~ {record['backtest']['end_date']}\n"
         )
 
@@ -1487,13 +1573,18 @@ def main():
     print(f"  결과 저장: {HISTORY_PATH}")
     print(f"  인사이트: {insights_path}")
 
-    # 상위 3개 출력
-    top3 = sorted(session_records, key=lambda r: r["score"], reverse=True)[:3]
-    print("\n▶ 이번 세션 Top 3:")
-    for i, r in enumerate(top3, 1):
-        etf_str = ", ".join(f"{e['name']}({e['weight']*100:.0f}%)" for e in r["portfolio"]["etfs"])
-        print(f"  {i}. [{r['score']:.1f}점] {etf_str}")
-        print(f"     CAGR {r['metrics']['cagr_pct']:.2f}% / MDD {r['metrics']['mdd_pct']:.2f}%")
+    # 성향별 Top 3 출력
+    print("\n▶ 이번 세션 Top 3 (성향별):")
+    for profile_label, emoji in [("공격형", "🚀"), ("중립형", "⚖️"), ("안정형", "🛡️")]:
+        top3 = sorted(session_records,
+                      key=lambda r, p=profile_label: r.get("scores", {}).get(p, r["score"]),
+                      reverse=True)[:3]
+        print(f"\n  {emoji} {profile_label}:")
+        for i, r in enumerate(top3, 1):
+            etf_str = ", ".join(f"{e['name']}({e['weight']*100:.0f}%)" for e in r["portfolio"]["etfs"])
+            sc = r.get("scores", {}).get(profile_label, r["score"])
+            print(f"    {i}. [{sc:.1f}점] {etf_str}")
+            print(f"       CAGR {r['metrics']['cagr_pct']:.2f}% / MDD {r['metrics']['mdd_pct']:.2f}%")
 
 
 if __name__ == "__main__":
