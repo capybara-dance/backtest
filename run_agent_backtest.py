@@ -1119,6 +1119,84 @@ def mdd_conservative_score(mdd_pct: float) -> float:
     return 100.0 * np.exp(-abs(mdd_pct) / 8.0)
 
 
+def compute_yearly_returns(portfolio: pd.Series) -> dict:
+    """연도별 수익률(%) 계산.
+
+    각 연도의 첫 거래일 기준으로 해당 연도 내 수익률을 계산합니다.
+    Returns: {year(int): return_pct(float)}
+    """
+    yearly = {}
+    for year, group in portfolio.groupby(portfolio.index.year):
+        if len(group) < 2:
+            continue
+        ret = (group.iloc[-1] / group.iloc[0] - 1) * 100
+        yearly[year] = round(float(ret), 2)
+    return yearly
+
+
+def compute_rolling_return_stats(portfolio: pd.Series, window_years: float) -> dict:
+    """구간별(rolling window) 수익률 통계 계산.
+
+    window_years 기간을 기준으로 모든 구간의 수익률 분포를 반환합니다.
+    Returns: {mean_pct, min_pct, max_pct, pct_positive, count}
+    """
+    window_days = int(window_years * 252)
+    if len(portfolio) <= window_days:
+        return {}
+    # 구간별 수익률: window_days 이후 값 / window_days 이전 값 - 1
+    end_vals = portfolio.iloc[window_days:]
+    start_vals = portfolio.iloc[:len(portfolio) - window_days]
+    rolls = (end_vals.values / start_vals.values - 1) * 100
+    # 연환산 수익률로 변환
+    rolls_annualized = ((1 + rolls / 100) ** (1 / window_years) - 1) * 100
+    return {
+        "mean_pct": round(float(np.mean(rolls_annualized)), 2),
+        "min_pct": round(float(np.min(rolls_annualized)), 2),
+        "max_pct": round(float(np.max(rolls_annualized)), 2),
+        "pct_positive": round(float(np.sum(rolls_annualized > 0) / len(rolls_annualized) * 100), 1),
+        "count": len(rolls_annualized),
+    }
+
+
+def recompute_portfolio_series(record: dict, prices_all: pd.DataFrame) -> pd.Series | None:
+    """기존 record의 설정으로 portfolio 가치 시리즈를 재계산합니다."""
+    etfs = record["portfolio"]["etfs"]
+    code_weight_list = [(e["code"], e["weight"]) for e in etfs]
+    raw_weights = {c: w for c, w in code_weight_list}
+    total_w = sum(raw_weights.values())
+
+    price_series = {}
+    for code, _ in code_weight_list:
+        if code not in prices_all.columns:
+            return None
+        s = prices_all[code].dropna()
+        if s.empty:
+            return None
+        price_series[code] = s
+
+    bt_start = max(s.index[0] for s in price_series.values())
+    bt_end = min(s.index[-1] for s in price_series.values())
+
+    price_df = pd.DataFrame({
+        code: s.loc[bt_start:bt_end]
+        for code, s in price_series.items()
+    }).ffill().dropna()
+
+    if price_df.empty:
+        return None
+
+    sym_weights = {c: raw_weights[c] / total_w for c in price_df.columns}
+    rebalance = record["portfolio"]["rebalancing"]["enabled"]
+    rebalance_freq = record["portfolio"]["rebalancing"]["frequency"] or "월별"
+
+    portfolio, _ = run_lump_sum(
+        price_df, INITIAL_AMOUNT, sym_weights,
+        rebalance, rebalance_freq,
+        dividend_df=None, reinvest_dividends=False,
+    )
+    return portfolio
+
+
 def compute_scores(history: list) -> list:
     """전체 history 기반 스코어 재계산.
 
@@ -1542,7 +1620,103 @@ def generate_latest_report_md(history: list, session: int, date_str: str) -> str
         f"  - {name}: {cnt}개 포트폴리오" for name, cnt in sorted(top_etf_counter.items(), key=lambda x: -x[1])
     )
 
-    md = f"""# 연금 ETF 포트폴리오 백테스트 종합 보고서
+    # ─── 연도별 & 구간별 수익률 (중립형 Top 3) ─────────────────────────
+    try:
+        prices_all = get_etf_prices()
+    except Exception:
+        prices_all = None
+
+    def build_yearly_rolling_section(top_records, prices_df, n=3):
+        """중립형 Top n 포트폴리오의 연도별·구간별 수익률 섹션 문자열 반환."""
+        lines = []
+        candidates = top_records[:n]
+        if prices_df is None or prices_df.empty:
+            return "_가격 데이터를 로드할 수 없어 계산 생략_"
+
+        # 연도별 수익률 테이블 헤더
+        all_years = set()
+        port_yearly_list = []
+        port_rolling_list = []
+
+        for rec in candidates:
+            port = recompute_portfolio_series(rec, prices_df)
+            if port is None or port.empty:
+                port_yearly_list.append(None)
+                port_rolling_list.append(None)
+                continue
+            yearly = compute_yearly_returns(port)
+            all_years.update(yearly.keys())
+            port_yearly_list.append(yearly)
+            rolling = {
+                "1년": compute_rolling_return_stats(port, 1.0),
+                "3년": compute_rolling_return_stats(port, 3.0),
+                "5년": compute_rolling_return_stats(port, 5.0),
+            }
+            port_rolling_list.append(rolling)
+
+        sorted_years = sorted(all_years)
+        if not sorted_years:
+            return "_연도별 수익률 계산에 실패했습니다_"
+
+        # ── 연도별 수익률 테이블 ──
+        names = [fmt_etfs(r) for r in candidates]
+        header_years = " | ".join(str(y) for y in sorted_years)
+        sep_years = " | ".join("------" for _ in sorted_years)
+        lines.append("### 📅 연도별 수익률 (Yearly Return)")
+        lines.append("")
+        lines.append(f"| 포트폴리오 | {header_years} |")
+        lines.append(f"|-----------|{sep_years}|")
+        for i, (rec, yearly) in enumerate(zip(candidates, port_yearly_list)):
+            name_short = names[i][:50] + ("..." if len(names[i]) > 50 else "")
+            if yearly is None:
+                row_vals = " | ".join("N/A" for _ in sorted_years)
+            else:
+                def fmt_yr(y, yr):
+                    v = yr.get(y)
+                    if v is None:
+                        return "—"
+                    sign = "+" if v >= 0 else ""
+                    return f"{sign}{v:.1f}%"
+                row_vals = " | ".join(fmt_yr(y, yearly) for y in sorted_years)
+            lines.append(f"| {name_short} | {row_vals} |")
+
+        lines.append("")
+        lines.append("> ℹ️ 각 연도의 첫 거래일~마지막 거래일 기준 수익률입니다.")
+
+        # ── 구간별(Rolling) 수익률 통계 테이블 ──
+        lines.append("")
+        lines.append("### 🔄 구간별 수익률 분포 (Rolling Return, 연환산)")
+        lines.append("")
+        lines.append("| 포트폴리오 | 구간 | 평균 | 최솟값 | 최댓값 | 양수 확률 |")
+        lines.append("|-----------|------|------|--------|--------|---------|")
+        for i, (rec, rolling) in enumerate(zip(candidates, port_rolling_list)):
+            name_short = names[i][:40] + ("..." if len(names[i]) > 40 else "")
+            if rolling is None:
+                lines.append(f"| {name_short} | — | N/A | N/A | N/A | N/A |")
+                continue
+            first = True
+            for window_label, stats in rolling.items():
+                if not stats:
+                    lines.append(f"| {name_short if first else ''} | {window_label} | 데이터부족 | — | — | — |")
+                    first = False
+                    continue
+                sign = lambda v: f"+{v:.1f}%" if v >= 0 else f"{v:.1f}%"
+                lines.append(
+                    f"| {name_short if first else ''} | {window_label} "
+                    f"| {sign(stats['mean_pct'])} "
+                    f"| {sign(stats['min_pct'])} "
+                    f"| {sign(stats['max_pct'])} "
+                    f"| {stats['pct_positive']:.0f}% |"
+                )
+                first = False
+        lines.append("")
+        lines.append("> ℹ️ 구간별 수익률은 해당 구간 동안 투자했을 때의 **연환산** 수익률 분포입니다. '양수 확률'은 해당 기간 수익이 플러스였던 구간의 비율입니다.")
+
+        return "\n".join(lines)
+
+    yearly_rolling_section = build_yearly_rolling_section(neu_top, prices_all, n=3)
+
+
 
 > 최종 업데이트: {date_str} (세션 {session} 완료 후)  
 > 작성자: AI Agent (run_agent_backtest.py)
@@ -1696,6 +1870,14 @@ def generate_latest_report_md(history: list, session: int, date_str: str) -> str
 {top_etf_lines}
 6. 리밸런싱 없는 단순 거치식이 대부분의 고스코어 포트폴리오에서 우세
 7. 채권 ETF 혼합 시 MDD 감소 효과가 있으나 CAGR이 크게 하락함
+
+---
+
+## 📅 연도별·구간별 수익률 (중립형 Top 3)
+
+_중립형 Top 3 포트폴리오를 기준으로 연도별 수익률과 구간별(Rolling) 수익률 분포를 분석합니다._
+
+{yearly_rolling_section}
 
 ---
 
