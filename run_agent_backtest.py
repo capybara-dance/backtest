@@ -1716,10 +1716,53 @@ def generate_latest_report_md(history: list, session: int, date_str: str) -> str
 
     yearly_rolling_section = build_yearly_rolling_section(neu_top, prices_all, n=3)
 
+    # 백테스트 기간 통계 (history 전체 기준)
+    bt_starts = [r["backtest"]["start_date"] for r in history if "backtest" in r and "start_date" in r["backtest"]]
+    bt_ends   = [r["backtest"]["end_date"]   for r in history if "backtest" in r and "end_date"   in r["backtest"]]
+    data_start_str = min(bt_starts) if bt_starts else "2015-01-02"
+    data_end_str   = max(bt_ends)   if bt_ends   else "2026-04-01"
+    avg_years = round(float(np.mean([r["metrics"]["years"] for r in history])), 1)
 
+    md = f"""# 연금 ETF 포트폴리오 백테스트 종합 보고서
 
 > 최종 업데이트: {date_str} (세션 {session} 완료 후)  
 > 작성자: AI Agent (run_agent_backtest.py)
+
+---
+
+## 🗓️ 백테스트 기간 안내
+
+> **이 섹션은 결과 해석에 매우 중요합니다.** 전략 성과는 테스트 기간의 시장 환경에 크게 의존합니다.
+
+### 데이터 범위
+
+| 항목 | 내용 |
+|------|------|
+| 가격 데이터 기간 | {data_start_str} ~ {data_end_str} |
+| 평균 백테스트 기간 | 약 {avg_years}년 |
+| 데이터 소스 | etf_prices.parquet (capybara_fetcher, KRX 국내 ETF) |
+| 투자 방식 | 거치식 (초기 1천만원 일괄 투자) |
+| 환율 반영 | 국내 상장 ETF 원화 종가 기준 (환헤지 여부는 ETF별 상이) |
+
+### 테스트 기간 주요 시장 이벤트
+
+| 연도 | 주요 이벤트 | 시장 영향 |
+|------|------------|---------|
+| 2015~2016 | 중국 증시 급락, 미국 금리 인상 시작 | 신흥국 변동성 확대 |
+| 2017~2018 | 미국 감세 정책, 무역전쟁 시작 | 미국 주식 강세, 신흥국 약세 |
+| 2019 | 미중 무역협상 진행 | 글로벌 증시 반등 |
+| 2020 Q1 | COVID-19 팬데믹 충격 | 전 세계 급락 (-30%+) 후 급반등 |
+| 2020 Q2~2021 | 각국 유동성 공급 (제로금리 + QE) | 역대급 상승장 |
+| 2022 | 미국 급격한 금리 인상 (0%→5.25%) | 주식+채권 동반 하락 |
+| 2023 | 금리 고점 논쟁, AI 기술주 급등 | 나스닥 중심 반등 |
+| 2024~2025 | AI·반도체 테마 지속 강세, 금리 인하 시작 | 미국 기술주 사상 최고치 |
+
+### 기간 편향(Survivorship Bias) 주의사항
+
+- **강세장 편중**: 2015~2026 기간은 미국 주식 역사상 손꼽히는 장기 강세장입니다. 미국 기술주(나스닥100, S&P500) ETF의 높은 CAGR은 이 특수한 기간을 반영합니다.
+- **채권 역풍**: 2022년 금리 급등으로 채권 ETF가 이례적으로 크게 하락했습니다. 이로 인해 채권 혼합 전략의 성과가 과소평가될 수 있습니다.
+- **환율 변동**: 원달러 환율 변동(2015년 약 1,100원 → 2025년 약 1,450원+)이 달러 자산 ETF의 성과를 추가로 높였습니다.
+- **미래 성과 불보장**: 과거 성과가 미래를 보장하지 않으며, 특히 이례적 강세장의 수치를 기준치로 삼는 것은 위험합니다.
 
 ---
 
