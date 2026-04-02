@@ -737,6 +737,143 @@ CANDIDATE_PORTFOLIOS = [
 
 
 # ─────────────────────────────────────────────
+# 세션 3+: 체계적 포트폴리오 생성기
+# ─────────────────────────────────────────────
+
+def generate_systematic_portfolios():
+    """
+    세션 3부터 사용되는 체계적 포트폴리오 생성기.
+
+    올바른 ETF 코드 기준:
+      133690: TIGER 미국나스닥100
+      304660: KODEX 미국30년국채울트라선물(H)  ← 정확한 초장기 미국채
+      360750: TIGER 미국S&P500
+      069500: KODEX 200
+      148070: KIWOOM 국고채10년
+      305080: TIGER 미국채10년선물
+      114260: KODEX 국고채3년
+      273130: KODEX 종합채권(AA-이상)액티브
+      229200: KODEX 코스닥150
+      182480: TIGER 미국MSCI리츠(합성H)
+      226490: KODEX 코스피  (세션 2에서 우연히 나스닥100과 궁합이 좋았던 ETF)
+      091160: KODEX 반도체
+    """
+    from itertools import combinations
+
+    NASD = "133690"   # 나스닥100 (핵심 자산)
+    ULTRA = "304660"  # 미국30년국채울트라선물(H) (올바른 초장기 미국채)
+    SP500 = "360750"  # 미국S&P500
+
+    TIER1 = [
+        (NASD,  "나스닥100"),
+        (ULTRA, "미국30년국채울트라"),
+        (SP500, "S&P500"),
+        ("069500", "국내200"),
+    ]
+    TIER2 = [
+        ("148070", "국채10년"),
+        ("305080", "미국채10년"),
+        ("114260", "국고채3년"),
+        ("273130", "종합채권"),
+    ]
+    TIER3 = [
+        ("229200", "코스닥150"),
+        ("182480", "미국리츠"),
+        ("226490", "코스피"),
+        ("091160", "반도체"),
+    ]
+    ALL_ETFS = TIER1 + TIER2 + TIER3  # 12종
+
+    candidates = []
+
+    # ── 1. 2자산: 나스닥100 + 파트너 (5% 단위 전체 스윕) ───────────
+    for code, name in ALL_ETFS:
+        if code == NASD:
+            continue
+        for w1 in range(5, 96, 5):
+            w2 = 100 - w1
+            candidates.append((
+                f"나스닥100 {w1}% + {name} {w2}%",
+                [(NASD, round(w1 / 100, 4)), (code, round(w2 / 100, 4))],
+                False, None,
+                f"체계적탐색S3: TIGER 미국나스닥100 {w1}% + {name} {w2}%. 2자산 5%단위."
+            ))
+
+    # ── 2. 2자산: S&P500 + TIER2/TIER3 (5% 단위) ────────────────────
+    for code, name in TIER2 + TIER3:
+        for w1 in range(5, 96, 5):
+            w2 = 100 - w1
+            candidates.append((
+                f"S&P500 {w1}% + {name} {w2}%",
+                [(SP500, round(w1 / 100, 4)), (code, round(w2 / 100, 4))],
+                False, None,
+                f"체계적탐색S3: TIGER 미국S&P500 {w1}% + {name} {w2}%. 2자산 5%단위."
+            ))
+
+    # ── 3. 3자산: 나스닥100 + 미국30년국채울트라 + X (10% 단위) ────
+    for code, name in [e for e in ALL_ETFS if e[0] not in (NASD, ULTRA)]:
+        for w_n in range(10, 81, 10):
+            for w_u in range(10, 91 - w_n, 10):
+                w_x = 100 - w_n - w_u
+                if w_x >= 10:
+                    candidates.append((
+                        f"나스닥100 {w_n}% + 미국30년국채울트라 {w_u}% + {name} {w_x}%",
+                        [(NASD, w_n / 100), (ULTRA, w_u / 100), (code, w_x / 100)],
+                        False, None,
+                        f"체계적탐색S3: 나스닥100 {w_n}% + 미국30년국채울트라 {w_u}% + {name} {w_x}%."
+                    ))
+
+    # ── 4. 3자산: 나스닥100 + S&P500 + X (10% 단위) ──────────────────
+    for code, name in TIER2 + TIER3:
+        for w_n in range(10, 71, 10):
+            for w_s in range(10, 81 - w_n, 10):
+                w_x = 100 - w_n - w_s
+                if w_x >= 10:
+                    candidates.append((
+                        f"나스닥100 {w_n}% + S&P500 {w_s}% + {name} {w_x}%",
+                        [(NASD, w_n / 100), (SP500, w_s / 100), (code, w_x / 100)],
+                        False, None,
+                        f"체계적탐색S3: 나스닥100 {w_n}% + S&P500 {w_s}% + {name} {w_x}%."
+                    ))
+
+    # ── 5. 4자산: 나스닥100 + 미국30년국채울트라 + X + Y (10% 단위) ─
+    other_etfs = [e for e in ALL_ETFS if e[0] not in (NASD, ULTRA)]
+    for (c1, n1), (c2, n2) in combinations(other_etfs, 2):
+        for w_n in range(40, 71, 10):      # 나스닥100: 40~70%
+            for w_u in range(10, 31, 10):  # 울트라30년: 10~20%
+                for w_c1 in range(10, 31, 10):
+                    w_c2 = 100 - w_n - w_u - w_c1
+                    if w_c2 >= 10:
+                        candidates.append((
+                            f"나스닥100 {w_n}% + 미국30년국채 {w_u}% + {n1} {w_c1}% + {n2} {w_c2}%",
+                            [(NASD, w_n / 100), (ULTRA, w_u / 100),
+                             (c1, w_c1 / 100), (c2, w_c2 / 100)],
+                            False, None,
+                            f"체계적탐색S3: 4자산 나스닥100 {w_n}% + 미국30년국채 {w_u}% "
+                            f"+ {n1} {w_c1}% + {n2} {w_c2}%."
+                        ))
+
+    # ── 6. 5자산 글로벌 분산: 나스닥100+미국30년국채울트라+S&P500+국채10년+국내200 ─
+    assets = [NASD, ULTRA, SP500, "148070", "069500"]
+    names5 = ["나스닥100", "미국30년국채울트라", "S&P500", "국채10년", "국내200"]
+    for w_n in range(30, 61, 10):
+        for w_u in range(10, 31, 10):
+            for w_s in range(10, 31, 10):
+                for w_k in range(10, 21, 10):
+                    w_d = 100 - w_n - w_u - w_s - w_k
+                    if w_d >= 10:
+                        candidates.append((
+                            f"5자산글로벌: 나스닥 {w_n}%+울트라30 {w_u}%+S&P {w_s}%+국채10 {w_k}%+국내200 {w_d}%",
+                            [(assets[i], [w_n, w_u, w_s, w_k, w_d][i] / 100) for i in range(5)],
+                            False, None,
+                            f"체계적탐색S3: 5자산 글로벌 분산 나스닥100 {w_n}% + 미국30년국채울트라 {w_u}% "
+                            f"+ S&P500 {w_s}% + 국채10년 {w_k}% + 국내200 {w_d}%."
+                        ))
+
+    return candidates
+
+
+# ─────────────────────────────────────────────
 # 헬퍼 함수
 # ─────────────────────────────────────────────
 
@@ -1086,14 +1223,35 @@ def main():
             if last_session_count < 100:
                 session = last_session  # 이어서 진행
 
-    existing_ids = {r["id"] for r in history}
     global_turn = len(history) + 1
 
-    # 사용할 포트폴리오 목록
-    candidates = CANDIDATE_PORTFOLIOS[: args.turns]
+    # 이미 테스트된 포트폴리오 구성 (중복 방지)
+    def portfolio_signature(code_weights):
+        return frozenset((c, round(w, 4)) for c, w in code_weights)
+
+    tested_sigs = set()
+    for r in history:
+        sig = frozenset((e["code"], round(e["weight"], 4)) for e in r["portfolio"]["etfs"])
+        tested_sigs.add(sig)
+
+    # 전체 후보 풀: 사전 정의 + 체계적 생성
+    all_pool = list(CANDIDATE_PORTFOLIOS)
+    if len(all_pool) - len(tested_sigs) < args.turns:
+        print("체계적 포트폴리오 생성 중...")
+        all_pool.extend(generate_systematic_portfolios())
+        print(f"  후보 풀 크기: {len(all_pool)}개")
+
+    # 미테스트 후보만 선택 (args.turns 개)
+    candidates = []
+    for cand in all_pool:
+        _, code_weights, _, _, _ = cand
+        if portfolio_signature(code_weights) not in tested_sigs:
+            candidates.append(cand)
+        if len(candidates) >= args.turns:
+            break
+
     if len(candidates) < args.turns:
-        # 부족한 경우 랜덤 변형 추가 (현재는 사전 정의만 사용)
-        candidates = candidates
+        print(f"  경고: {len(candidates)}개의 미테스트 포트폴리오만 가용 (요청: {args.turns})")
 
     print(f"=== 연금 ETF Agent 백테스트 시작 ===")
     print(f"세션: {session}, 예정 턴 수: {len(candidates)}")
