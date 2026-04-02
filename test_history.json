@@ -1,0 +1,462 @@
+[
+  {
+    "id": "test_0001",
+    "session": 1,
+    "turn": 1,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:31.664864+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.35
+        },
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.25
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.4
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 12.8592,
+      "total_return_pct": 289.7139,
+      "mdd_pct": -24.4162,
+      "sharpe_ratio": 0.8069,
+      "volatility_annual_pct": 12.6795,
+      "calmar_ratio": 0.5267,
+      "years": 11.24
+    },
+    "score": 47.0,
+    "notes": "국내주식(KODEX200) 35% + 미국나스닥100 25% + 국고채10년 40%. 안정적 혼합 기본형."
+  },
+  {
+    "id": "test_0002",
+    "session": 1,
+    "turn": 2,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:31.766663+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.33
+        },
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.33
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.34
+        }
+      ],
+      "rebalancing": {
+        "enabled": true,
+        "frequency": "분기별"
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 12.2574,
+      "total_return_pct": 266.9739,
+      "mdd_pct": -21.4265,
+      "sharpe_ratio": 0.8296,
+      "volatility_annual_pct": 11.499,
+      "calmar_ratio": 0.5721,
+      "years": 11.24
+    },
+    "score": 46.0,
+    "notes": "국내200 + 미국나스닥100 + 국고채10년 균등 배분. 분기 리밸런싱."
+  },
+  {
+    "id": "test_0003",
+    "session": 1,
+    "turn": 3,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:31.865719+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.5
+        },
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.2
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.3
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 15.6467,
+      "total_return_pct": 412.7329,
+      "mdd_pct": -27.4162,
+      "sharpe_ratio": 0.8636,
+      "volatility_annual_pct": 15.1487,
+      "calmar_ratio": 0.5707,
+      "years": 11.24
+    },
+    "score": 75.5,
+    "notes": "미국나스닥100 50% + 국내200 20% + 국고채10년 30%."
+  },
+  {
+    "id": "test_0004",
+    "session": 1,
+    "turn": 4,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:31.933051+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 1.0
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 20.1582,
+      "total_return_pct": 688.453,
+      "mdd_pct": -31.0263,
+      "sharpe_ratio": 0.8928,
+      "volatility_annual_pct": 20.0182,
+      "calmar_ratio": 0.6497,
+      "years": 11.24
+    },
+    "score": 94.0,
+    "notes": "TIGER 미국나스닥100 단독. 성장 기준선."
+  },
+  {
+    "id": "test_0005",
+    "session": 1,
+    "turn": 5,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.000280+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 1.0
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 13.4945,
+      "total_return_pct": 315.1048,
+      "mdd_pct": -38.0881,
+      "sharpe_ratio": 0.6046,
+      "volatility_annual_pct": 19.7932,
+      "calmar_ratio": 0.3543,
+      "years": 11.24
+    },
+    "score": 61.5,
+    "notes": "KODEX 200 단독. 국내 기준선."
+  },
+  {
+    "id": "test_0006",
+    "session": 1,
+    "turn": 6,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.093961+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.8
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.2
+        }
+      ],
+      "rebalancing": {
+        "enabled": true,
+        "frequency": "연간"
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 16.735,
+      "total_return_pct": 469.6847,
+      "mdd_pct": -26.5927,
+      "sharpe_ratio": 0.8802,
+      "volatility_annual_pct": 16.131,
+      "calmar_ratio": 0.6293,
+      "years": 11.24
+    },
+    "score": 81.0,
+    "notes": "미국나스닥100 80% + 국고채10년 20%. 연간 리밸런싱."
+  },
+  {
+    "id": "test_0007",
+    "session": 1,
+    "turn": 7,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.195103+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "091160",
+          "name": "KODEX 반도체",
+          "weight": 0.3
+        },
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.3
+        },
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.2
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.2
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 15.529,
+      "total_return_pct": 406.8991,
+      "mdd_pct": -31.284,
+      "sharpe_ratio": 0.7858,
+      "volatility_annual_pct": 16.8648,
+      "calmar_ratio": 0.4964,
+      "years": 11.24
+    },
+    "score": 65.5,
+    "notes": "KODEX 반도체 30% + 미국나스닥100 30% + 국내200 20% + 국채 20%."
+  },
+  {
+    "id": "test_0008",
+    "session": 1,
+    "turn": 8,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.274393+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "279530",
+          "name": "KODEX 고배당주",
+          "weight": 0.3
+        },
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.2
+        },
+        {
+          "code": "133690",
+          "name": "TIGER 미국나스닥100",
+          "weight": 0.2
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.3
+        }
+      ],
+      "rebalancing": {
+        "enabled": true,
+        "frequency": "연간"
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2017-10-17",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 12.1439,
+      "total_return_pct": 163.5276,
+      "mdd_pct": -22.4711,
+      "sharpe_ratio": 0.8237,
+      "volatility_annual_pct": 11.4529,
+      "calmar_ratio": 0.5404,
+      "years": 8.45
+    },
+    "score": 40.5,
+    "notes": "KODEX고배당주 30% + 국내+미국 주식 20%씩 + 채권 30%. 연간 리밸런싱."
+  },
+  {
+    "id": "test_0009",
+    "session": 1,
+    "turn": 9,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.340467+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 1.0
+        }
+      ],
+      "rebalancing": {
+        "enabled": false,
+        "frequency": null
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 1.5046,
+      "total_return_pct": 18.2849,
+      "mdd_pct": -20.2943,
+      "sharpe_ratio": -0.2449,
+      "volatility_annual_pct": 5.3921,
+      "calmar_ratio": 0.0741,
+      "years": 11.24
+    },
+    "score": 10.0,
+    "notes": "KIWOOM 국고채10년 단독. 채권 기준선."
+  },
+  {
+    "id": "test_0010",
+    "session": 1,
+    "turn": 10,
+    "triggered_by": "ai_agent",
+    "timestamp": "2026-04-02T03:30:32.437985+00:00",
+    "portfolio": {
+      "etfs": [
+        {
+          "code": "069500",
+          "name": "KODEX 200",
+          "weight": 0.6
+        },
+        {
+          "code": "148070",
+          "name": "KIWOOM 국고채10년",
+          "weight": 0.4
+        }
+      ],
+      "rebalancing": {
+        "enabled": true,
+        "frequency": "월별"
+      },
+      "reinvest_dividends": false
+    },
+    "backtest": {
+      "start_date": "2015-01-02",
+      "end_date": "2026-04-01",
+      "invest_type": "거치식",
+      "initial_amount": 10000000,
+      "data_source": "etf_prices.parquet (capybara_fetcher)"
+    },
+    "metrics": {
+      "cagr_pct": 9.0892,
+      "total_return_pct": 165.9683,
+      "mdd_pct": -26.5715,
+      "sharpe_ratio": 0.5494,
+      "volatility_annual_pct": 12.1506,
+      "calmar_ratio": 0.3421,
+      "years": 11.24
+    },
+    "score": 29.0,
+    "notes": "국내KOSPI200 60% + 국고채10년 40%. 월별 리밸런싱. 전통적 60/40."
+  }
+]
