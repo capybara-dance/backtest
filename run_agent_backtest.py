@@ -874,6 +874,166 @@ def generate_systematic_portfolios():
 
 
 # ─────────────────────────────────────────────
+# 세션 4+: 확장 포트폴리오 생성기
+# ─────────────────────────────────────────────
+
+def generate_systematic_portfolios_s4():
+    """
+    세션 4부터 사용되는 확장 포트폴리오 생성기.
+
+    세션 3 인사이트:
+      - KODEX 반도체(091160) + TIGER 미국S&P500(360750) 조합이 최강 (90점 이상)
+      - KODEX 코스피(226490)가 2020~2026 구간에서 의외의 강세
+
+    세션 4 탐색 방향:
+      1. 반도체(091160) + S&P500(360750) + 나스닥100(133690) 비중 5% 단위 세분화
+      2. 신규 ETF 도입: TIGER 반도체(091230), TIGER 200IT(139260),
+         TIGER 헬스케어(143860), KODEX 2차전지산업(305720),
+         TIGER 미국나스닥바이오(203780), KODEX 글로벌로봇(276990),
+         KODEX 미국S&P바이오(185680), KODEX 고배당주(279530)
+      3. 리밸런싱 효과 탐색 (분기별, 반기별, 연간)
+      4. 상위 3자산 4~5자산으로 확장
+    """
+    from itertools import combinations
+
+    NASD  = "133690"  # TIGER 미국나스닥100
+    SP500 = "360750"  # TIGER 미국S&P500
+    SEMI  = "091160"  # KODEX 반도체
+    KSP   = "226490"  # KODEX 코스피
+
+    # ── A. 세션 3 Top 패턴: 반도체+S&P500+나스닥100 5% 단위 세분화 ───
+    candidates = []
+    for w_semi in range(5, 91, 5):
+        for w_sp in range(5, 96 - w_semi, 5):
+            w_nasd = 100 - w_semi - w_sp
+            if w_nasd >= 5:
+                candidates.append((
+                    f"반도체 {w_semi}% + S&P500 {w_sp}% + 나스닥100 {w_nasd}%",
+                    [(SEMI, w_semi / 100), (SP500, w_sp / 100), (NASD, w_nasd / 100)],
+                    False, None,
+                    f"체계적탐색S4-A: KODEX 반도체 {w_semi}% + TIGER 미국S&P500 {w_sp}% "
+                    f"+ TIGER 미국나스닥100 {w_nasd}%."
+                ))
+
+    # ── B. 신규 ETF 단독/2자산 (5% 단위) ────────────────────────────
+    NEW_ETFS = [
+        ("091230", "TIGER 반도체"),
+        ("139260", "TIGER 200IT"),
+        ("143860", "TIGER 헬스케어"),
+        ("305720", "KODEX 2차전지산업"),
+        ("203780", "TIGER 미국나스닥바이오"),
+        ("276990", "KODEX 글로벌로봇"),
+        ("185680", "KODEX 미국S&P바이오"),
+        ("279530", "KODEX 고배당주"),
+        ("287180", "PLUS 미국나스닥테크"),
+        ("248270", "TIGER S&P글로벌헬스케어"),
+    ]
+    PARTNERS = [
+        (NASD, "나스닥100"),
+        (SP500, "S&P500"),
+        (SEMI, "반도체"),
+        ("148070", "국채10년"),
+    ]
+    for new_code, new_name in NEW_ETFS:
+        # 단독
+        candidates.append((
+            f"{new_name} 100%",
+            [(new_code, 1.0)],
+            False, None,
+            f"체계적탐색S4-B: {new_name} 단독 100%. 신규 ETF 기준선."
+        ))
+        # 2자산 파트너별 5% 단위
+        for p_code, p_name in PARTNERS:
+            if p_code == new_code:
+                continue
+            for w1 in range(10, 91, 10):
+                w2 = 100 - w1
+                candidates.append((
+                    f"{new_name} {w1}% + {p_name} {w2}%",
+                    [(new_code, w1 / 100), (p_code, w2 / 100)],
+                    False, None,
+                    f"체계적탐색S4-B: {new_name} {w1}% + {p_name} {w2}%. 신규ETF 2자산."
+                ))
+
+    # ── C. 신규 ETF + 나스닥100 + 국채10년 (10% 단위 3자산) ──────────
+    for new_code, new_name in NEW_ETFS:
+        for w_new in range(20, 61, 10):
+            for w_n in range(20, 71 - w_new, 10):
+                w_b = 100 - w_new - w_n
+                if w_b >= 20:
+                    candidates.append((
+                        f"{new_name} {w_new}% + 나스닥100 {w_n}% + 국채10년 {w_b}%",
+                        [(new_code, w_new / 100), (NASD, w_n / 100), ("148070", w_b / 100)],
+                        False, None,
+                        f"체계적탐색S4-C: {new_name} {w_new}% + 나스닥100 {w_n}% + 국채10년 {w_b}%."
+                    ))
+
+    # ── D. 세션3 상위 3자산에 채권 헤지 추가 (4자산) ────────────────
+    BONDS = [
+        ("148070", "국채10년"),
+        ("305080", "미국채10년"),
+        ("304660", "미국30년국채울트라"),
+    ]
+    for bond_code, bond_name in BONDS:
+        for w_semi in range(30, 61, 10):
+            for w_sp in range(10, 41, 10):
+                for w_nasd in range(10, 41, 10):
+                    w_bond = 100 - w_semi - w_sp - w_nasd
+                    if w_bond >= 10:
+                        candidates.append((
+                            f"반도체 {w_semi}% + S&P500 {w_sp}% + 나스닥100 {w_nasd}% + {bond_name} {w_bond}%",
+                            [(SEMI, w_semi / 100), (SP500, w_sp / 100),
+                             (NASD, w_nasd / 100), (bond_code, w_bond / 100)],
+                            False, None,
+                            f"체계적탐색S4-D: 반도체 {w_semi}% + S&P500 {w_sp}% "
+                            f"+ 나스닥100 {w_nasd}% + {bond_name} {w_bond}%."
+                        ))
+
+    # ── E. 리밸런싱 효과: 세션3 상위 전략에 연간/분기별 리밸런싱 ────
+    TOP_COMBOS = [
+        ([(NASD, 0.20), (SP500, 0.30), (SEMI, 0.50)], "나스닥100 20%+S&P500 30%+반도체 50%"),
+        ([(NASD, 0.30), (SP500, 0.20), (SEMI, 0.50)], "나스닥100 30%+S&P500 20%+반도체 50%"),
+        ([(NASD, 0.40), (SP500, 0.20), (SEMI, 0.40)], "나스닥100 40%+S&P500 20%+반도체 40%"),
+        ([(SP500, 0.40), (SEMI, 0.60)], "S&P500 40%+반도체 60%"),
+        ([(SP500, 0.35), (SEMI, 0.65)], "S&P500 35%+반도체 65%"),
+        ([(NASD, 1.0)], "나스닥100 100%"),
+        ([(SP500, 1.0)], "S&P500 100%"),
+        ([(SEMI, 1.0)], "반도체 100%"),
+    ]
+    for cw, label in TOP_COMBOS:
+        for freq in ["분기별", "반기별", "연간"]:
+            candidates.append((
+                f"{label} ({freq} 리밸)",
+                cw,
+                True, freq,
+                f"체계적탐색S4-E: {label}. {freq} 리밸런싱 효과 검증."
+            ))
+
+    # ── F. 코스피(226490) 중심 조합 탐색 ─────────────────────────────
+    for w_ksp in range(20, 81, 10):
+        for w_semi in range(10, 81 - w_ksp, 10):
+            w_rest = 100 - w_ksp - w_semi
+            if w_rest >= 10:
+                candidates.append((
+                    f"코스피 {w_ksp}% + 반도체 {w_semi}% + 나스닥100 {w_rest}%",
+                    [(KSP, w_ksp / 100), (SEMI, w_semi / 100), (NASD, w_rest / 100)],
+                    False, None,
+                    f"체계적탐색S4-F: KODEX 코스피 {w_ksp}% + 반도체 {w_semi}% + 나스닥100 {w_rest}%."
+                ))
+        for w_sp in range(10, 81 - w_ksp, 10):
+            w_rest = 100 - w_ksp - w_sp
+            if w_rest >= 10:
+                candidates.append((
+                    f"코스피 {w_ksp}% + S&P500 {w_sp}% + 나스닥100 {w_rest}%",
+                    [(KSP, w_ksp / 100), (SP500, w_sp / 100), (NASD, w_rest / 100)],
+                    False, None,
+                    f"체계적탐색S4-F: KODEX 코스피 {w_ksp}% + S&P500 {w_sp}% + 나스닥100 {w_rest}%."
+                ))
+
+    return candidates
+
+
+# ─────────────────────────────────────────────
 # 헬퍼 함수
 # ─────────────────────────────────────────────
 
@@ -1234,12 +1394,16 @@ def main():
         sig = frozenset((e["code"], round(e["weight"], 4)) for e in r["portfolio"]["etfs"])
         tested_sigs.add(sig)
 
-    # 전체 후보 풀: 사전 정의 + 체계적 생성
+    # 전체 후보 풀: 사전 정의 + 체계적 생성 (S3) + 확장 생성 (S4)
     all_pool = list(CANDIDATE_PORTFOLIOS)
     if len(all_pool) - len(tested_sigs) < args.turns:
-        print("체계적 포트폴리오 생성 중...")
+        print("체계적 포트폴리오 생성 중 (S3)...")
         all_pool.extend(generate_systematic_portfolios())
-        print(f"  후보 풀 크기: {len(all_pool)}개")
+        print(f"  S3 생성 후 풀 크기: {len(all_pool)}개")
+    if len([c for c in all_pool if portfolio_signature(c[1]) not in tested_sigs]) < args.turns:
+        print("확장 포트폴리오 생성 중 (S4)...")
+        all_pool.extend(generate_systematic_portfolios_s4())
+        print(f"  S4 생성 후 풀 크기: {len(all_pool)}개")
 
     # 미테스트 후보만 선택 (args.turns 개)
     candidates = []
