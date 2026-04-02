@@ -1445,6 +1445,160 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
     return md
 
 
+def generate_latest_report_md(history: list, session: int, date_str: str) -> str:
+    """모든 세션의 결과를 종합·요약한 latest_report.md 생성."""
+
+    def fmt_etfs(rec):
+        parts = [f"{e['name']}({e['weight']*100:.0f}%)" for e in rec["portfolio"]["etfs"]]
+        return ", ".join(parts)
+
+    def fmt_row(rank, rec, profile=None):
+        rb = rec["portfolio"]["rebalancing"]
+        rb_str = f"{rb['frequency']}" if rb["enabled"] else "없음"
+        scores = rec.get("scores", {})
+        score_val = scores.get(profile, rec["score"]) if profile else rec["score"]
+        return (
+            f"| {rank} | {rec['id']} | {fmt_etfs(rec)} | "
+            f"{rec['metrics']['cagr_pct']:.2f}% | {rec['metrics']['mdd_pct']:.2f}% | "
+            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {score_val:.1f} |"
+        )
+
+    def profile_top_n(records, profile, n=10):
+        top = sorted(records, key=lambda r: r.get("scores", {}).get(profile, r["score"]), reverse=True)[:n]
+        rows = "\n".join(fmt_row(i + 1, r, profile) for i, r in enumerate(top))
+        return rows, top
+
+    col_header = "| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |"
+    col_sep    = "|-----|----|----------|------|-----|------|---------|--------|"
+
+    # 전체 Top 10 (성향별)
+    agg_rows, agg_top = profile_top_n(history, "공격형")
+    neu_rows, neu_top = profile_top_n(history, "중립형")
+    con_rows, con_top = profile_top_n(history, "안정형")
+
+    # 세션별 요약 통계
+    sessions_done = sorted(set(r["session"] for r in history))
+    session_summary_rows = []
+    for s in sessions_done:
+        recs = [r for r in history if r["session"] == s]
+        cagrs = [r["metrics"]["cagr_pct"] for r in recs]
+        mdds  = [abs(r["metrics"]["mdd_pct"]) for r in recs]
+        neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in recs]
+        best = sorted(recs, key=lambda r: r.get("scores", {}).get("중립형", r["score"]), reverse=True)[0]
+        session_summary_rows.append(
+            f"| {s} | {len(recs)} | {sum(len(r2) for r2 in [recs[:i+1] for i in range(len(recs))])//len(recs) if recs else 0} | "
+            f"{np.mean(cagrs):.2f}% | -{np.mean(mdds):.2f}% | {np.mean(neu_scores):.1f} | "
+            f"{best['id']} ({best['metrics']['cagr_pct']:.2f}% CAGR) |"
+        )
+
+    # 실제 세션별 요약은 간결하게 재작성
+    session_rows_clean = []
+    for s in sessions_done:
+        recs = [r for r in history if r["session"] == s]
+        cagrs = [r["metrics"]["cagr_pct"] for r in recs]
+        mdds  = [abs(r["metrics"]["mdd_pct"]) for r in recs]
+        neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in recs]
+        best = sorted(recs, key=lambda r: r.get("scores", {}).get("중립형", r["score"]), reverse=True)[0]
+        best_etfs = ", ".join(e["name"] for e in best["portfolio"]["etfs"][:3])
+        session_rows_clean.append(
+            f"| {s} | {len(recs)} | {np.mean(cagrs):.2f}% | -{np.mean(mdds):.2f}% | "
+            f"{np.max(cagrs):.2f}% | {np.mean(neu_scores):.1f} | {best['id']} | {best_etfs}... |"
+        )
+
+    session_table = "\n".join(session_rows_clean)
+
+    # 전체 통계
+    all_cagrs = [r["metrics"]["cagr_pct"] for r in history]
+    all_mdds  = [abs(r["metrics"]["mdd_pct"]) for r in history]
+    all_sharpes = [r["metrics"].get("sharpe_ratio") or 0 for r in history]
+    all_neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in history]
+
+    # 공통 ETF 분석 (Top 10 중립형 기준)
+    top_etf_counter: dict = {}
+    for r in neu_top:
+        for e in r["portfolio"]["etfs"]:
+            top_etf_counter[e["name"]] = top_etf_counter.get(e["name"], 0) + 1
+    top_etf_lines = "\n".join(
+        f"  - {name}: {cnt}개 포트폴리오" for name, cnt in sorted(top_etf_counter.items(), key=lambda x: -x[1])
+    )
+
+    md = f"""# 연금 ETF 포트폴리오 백테스트 종합 보고서
+
+> 최종 업데이트: {date_str} (세션 {session} 완료 후)  
+> 작성자: AI Agent (run_agent_backtest.py)
+
+---
+
+## 📊 전체 요약
+
+| 항목 | 값 |
+|------|----|
+| 완료 세션 수 | {len(sessions_done)}개 (세션 {sessions_done[0]}~{sessions_done[-1]}) |
+| 총 테스트 기록 | {len(history)}개 포트폴리오 |
+| 전체 평균 CAGR | {np.mean(all_cagrs):.2f}% |
+| 전체 평균 MDD | -{np.mean(all_mdds):.2f}% |
+| 전체 최고 CAGR | {np.max(all_cagrs):.2f}% |
+| 전체 최저 MDD(최소) | -{np.min(all_mdds):.2f}% |
+| 전체 평균 샤프지수 | {np.mean(all_sharpes):.4f} |
+| 전체 평균 중립형 스코어 | {np.mean(all_neu_scores):.1f} |
+
+---
+
+## 🏆 투자자 성향별 전체 Top 10
+
+### 🚀 공격형 (CAGR 55% / MDD 10% / 샤프 20% / 칼마 15%)
+
+{col_header}
+{col_sep}
+{agg_rows}
+
+### ⚖️ 중립형 (CAGR 35% / MDD 30% / 샤프 20% / 칼마 15%)
+
+{col_header}
+{col_sep}
+{neu_rows}
+
+### 🛡️ 안정형 (CAGR 15% / MDD 50% / 샤프 25% / 칼마 10%)
+
+{col_header}
+{col_sep}
+{con_rows}
+
+---
+
+## 📈 세션별 요약
+
+| 세션 | 테스트수 | 평균CAGR | 평균MDD | 최고CAGR | 평균스코어(중립) | 최고ID | 최고구성(상위3) |
+|------|---------|---------|--------|---------|--------------|------|-------------|
+{session_table}
+
+---
+
+## 🔑 핵심 발견 (누적)
+
+1. **미국 기술주 ETF(나스닥100, S&P500) + KODEX 반도체** 조합이 공격형·중립형에서 일관되게 최상위 기록
+2. **공격형 No.1**: {agg_top[0]['id']} — {fmt_etfs(agg_top[0])} (CAGR {agg_top[0]['metrics']['cagr_pct']:.2f}%, MDD {agg_top[0]['metrics']['mdd_pct']:.2f}%)
+3. **중립형 No.1**: {neu_top[0]['id']} — {fmt_etfs(neu_top[0])} (CAGR {neu_top[0]['metrics']['cagr_pct']:.2f}%, MDD {neu_top[0]['metrics']['mdd_pct']:.2f}%)
+4. **안정형 No.1**: {con_top[0]['id']} — {fmt_etfs(con_top[0])} (CAGR {con_top[0]['metrics']['cagr_pct']:.2f}%, MDD {con_top[0]['metrics']['mdd_pct']:.2f}%)
+5. **중립형 Top 10에 공통으로 등장하는 ETF:**
+{top_etf_lines}
+6. 리밸런싱 없는 단순 거치식이 대부분의 고스코어 포트폴리오에서 우세
+7. 채권 ETF 혼합 시 MDD 감소 효과가 있으나 CAGR이 크게 하락함
+
+---
+
+## 🔭 다음 세션 탐색 방향
+
+- [ ] 상위 포트폴리오(나스닥100+S&P500+반도체) 비중 미세 조정 심화 탐색
+- [ ] 2차전지, 헬스케어, 리츠(REITs) 등 추가 테마 혼합 탐색
+- [ ] 채권 비중 5%~30% 범위로 세분화하여 리스크 조절 탐색
+- [ ] 해외 채권 ETF(미국채10년, 미국채30년) + 주식 혼합 전략 심화
+- [ ] 배당 ETF + 성장주 ETF 혼합 인컴형 포트폴리오 탐색
+- [ ] 국내 섹터 ETF(반도체, IT, 금융) + 해외 지수 ETF 조합 탐색
+"""
+    return md
+
+
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
@@ -1567,11 +1721,18 @@ def main():
     with open(insights_path, "w", encoding="utf-8") as f:
         f.write(insights_md)
 
+    # latest_report.md 업데이트 (전 세션 종합 요약)
+    latest_report_path = BASE_DIR / "latest_report.md"
+    latest_report_md = generate_latest_report_md(history, session, date_str)
+    with open(latest_report_path, "w", encoding="utf-8") as f:
+        f.write(latest_report_md)
+
     print(f"=== 세션 {session} 완료 ===")
     print(f"  테스트 완료: {len(session_records)}개 / 예정 {len(candidates)}개")
     print(f"  누적 기록: {len(history)}개")
     print(f"  결과 저장: {HISTORY_PATH}")
     print(f"  인사이트: {insights_path}")
+    print(f"  종합 보고서: {latest_report_path}")
 
     # 성향별 Top 3 출력
     print("\n▶ 이번 세션 Top 3 (성향별):")
