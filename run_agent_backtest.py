@@ -44,8 +44,8 @@ MAX_ETF_PER_PORTFOLIO = 10
 WEIGHTS_NEUTRAL   = dict(cagr=0.35, mdd=0.30, sharpe=0.20, calmar=0.15)
 # 공격형: 수익률 극대화, 손실 허용
 WEIGHTS_AGGRESSIVE = dict(cagr=0.55, mdd=0.10, sharpe=0.20, calmar=0.15)
-# 안정형: 손실 최소화, 꾸준한 성과
-WEIGHTS_CONSERVATIVE = dict(cagr=0.15, mdd=0.50, sharpe=0.25, calmar=0.10)
+# 안정형: MDD 최우선 (목표 MDD < 10%), CAGR 희생 감수
+WEIGHTS_CONSERVATIVE = dict(cagr=0.05, mdd=0.80, sharpe=0.10, calmar=0.05)
 
 INVESTOR_PROFILES = {
     "공격형": WEIGHTS_AGGRESSIVE,
@@ -1108,35 +1108,55 @@ def percentile_rank(value, series):
     return float(np.sum(arr <= value) / len(arr) * 100)
 
 
+def mdd_conservative_score(mdd_pct: float) -> float:
+    """안정형 전용 MDD 절대값 기반 스코어 (0~100).
+
+    백분위수 방식 대신 절대값 기반으로 MDD < 10% 목표를 강제합니다.
+    지수 감소 함수: 100 * exp(-|MDD| / 8)
+      MDD  0%: 100점  MDD  5%: ~53점  MDD 10%: ~29점  MDD 20%: ~8점  MDD 30%+: ~2점
+    이렇게 하면 순수 백분위수와 달리 MDD 10%가 넘는 포트폴리오는 항상 낮은 점수를 받습니다.
+    """
+    return 100.0 * np.exp(-abs(mdd_pct) / 8.0)
+
+
 def compute_scores(history: list) -> list:
-    """전체 history 기반 백분위수 스코어 재계산.
+    """전체 history 기반 스코어 재계산.
 
     각 레코드에 다음 필드를 추가/갱신합니다:
       - score          : 중립형 스코어 (하위 호환)
-      - scores.공격형  : 공격형 스코어
-      - scores.안정형  : 안정형 스코어
-      - scores.중립형  : 중립형 스코어
+      - scores.공격형  : 공격형 스코어 (백분위수 기반)
+      - scores.중립형  : 중립형 스코어 (백분위수 기반)
+      - scores.안정형  : 안정형 스코어 (MDD는 절대값 기반 → MDD 10% 이하 강제)
     """
     if not history:
         return history
 
     cagrs   = [r["metrics"]["cagr_pct"] for r in history]
-    mdds    = [-r["metrics"]["mdd_pct"] for r in history]   # 낙폭 작을수록 좋음
+    mdds    = [r["metrics"]["mdd_pct"] for r in history]    # 음수값 그대로 사용. 덜 음수(낙폭 작음)일수록 높은 점수
     sharpes = [r["metrics"]["sharpe_ratio"] for r in history]
     calmars = [r["metrics"]["calmar_ratio"] for r in history]
 
     for r in history:
         sc_cagr   = percentile_rank(r["metrics"]["cagr_pct"], cagrs)
-        sc_mdd    = percentile_rank(-r["metrics"]["mdd_pct"], mdds)
+        sc_mdd    = percentile_rank(r["metrics"]["mdd_pct"], mdds)   # 음수 비교: -5 > -30 → -5%가 높은 순위
         sc_sharpe = percentile_rank(r["metrics"]["sharpe_ratio"], sharpes)
         sc_calmar = percentile_rank(r["metrics"]["calmar_ratio"], calmars)
 
+        # 안정형 MDD는 절대값 기반 스코어 사용 (백분위수 방식으로는 10% 이하 강제 불가)
+        sc_mdd_conservative = mdd_conservative_score(r["metrics"]["mdd_pct"])
+
         profile_scores = {}
         for profile, w in INVESTOR_PROFILES.items():
-            profile_scores[profile] = round(
-                w["cagr"] * sc_cagr + w["mdd"] * sc_mdd +
-                w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
-            )
+            if profile == "안정형":
+                profile_scores[profile] = round(
+                    w["cagr"] * sc_cagr + w["mdd"] * sc_mdd_conservative +
+                    w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
+                )
+            else:
+                profile_scores[profile] = round(
+                    w["cagr"] * sc_cagr + w["mdd"] * sc_mdd +
+                    w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
+                )
 
         r["scores"] = profile_scores
         r["score"]  = profile_scores["중립형"]   # 하위 호환
@@ -1380,7 +1400,7 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
 |------|------|-----|------|------|------|
 | 🚀 공격형 | {WEIGHTS_AGGRESSIVE['cagr']*100:.0f}% | {WEIGHTS_AGGRESSIVE['mdd']*100:.0f}% | {WEIGHTS_AGGRESSIVE['sharpe']*100:.0f}% | {WEIGHTS_AGGRESSIVE['calmar']*100:.0f}% | 수익률 극대화, 손실 허용 |
 | ⚖️ 중립형 | {WEIGHTS_NEUTRAL['cagr']*100:.0f}% | {WEIGHTS_NEUTRAL['mdd']*100:.0f}% | {WEIGHTS_NEUTRAL['sharpe']*100:.0f}% | {WEIGHTS_NEUTRAL['calmar']*100:.0f}% | 수익·리스크 균형 |
-| 🛡️ 안정형 | {WEIGHTS_CONSERVATIVE['cagr']*100:.0f}% | {WEIGHTS_CONSERVATIVE['mdd']*100:.0f}% | {WEIGHTS_CONSERVATIVE['sharpe']*100:.0f}% | {WEIGHTS_CONSERVATIVE['calmar']*100:.0f}% | 손실 최소화, 꾸준한 성과 |
+| 🛡️ 안정형 | {WEIGHTS_CONSERVATIVE['cagr']*100:.0f}% | {WEIGHTS_CONSERVATIVE['mdd']*100:.0f}% | {WEIGHTS_CONSERVATIVE['sharpe']*100:.0f}% | {WEIGHTS_CONSERVATIVE['calmar']*100:.0f}% | MDD 절대값 기반 스코어링, MDD 10% 이하 목표 |
 
 ---
 
