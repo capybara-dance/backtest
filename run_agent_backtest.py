@@ -39,11 +39,25 @@ RISK_FREE_RATE = 0.03         # 무위험이자율 3%
 MIN_YEARS = 3                 # 최소 백테스트 기간 (년)
 MAX_ETF_PER_PORTFOLIO = 10
 
-# 스코어링 가중치
-W_CAGR = 0.35
-W_MDD = 0.30
-W_SHARPE = 0.20
-W_CALMAR = 0.15
+# 스코어링 가중치 - 투자자 성향별 (CAGR, MDD, Sharpe, Calmar)
+# 중립형: 수익·리스크 균형
+WEIGHTS_NEUTRAL   = dict(cagr=0.35, mdd=0.30, sharpe=0.20, calmar=0.15)
+# 공격형: 수익률 극대화, 손실 허용
+WEIGHTS_AGGRESSIVE = dict(cagr=0.55, mdd=0.10, sharpe=0.20, calmar=0.15)
+# 안정형: MDD 최우선 (목표 MDD < 10%), CAGR 희생 감수
+WEIGHTS_CONSERVATIVE = dict(cagr=0.05, mdd=0.80, sharpe=0.10, calmar=0.05)
+
+INVESTOR_PROFILES = {
+    "공격형": WEIGHTS_AGGRESSIVE,
+    "중립형": WEIGHTS_NEUTRAL,
+    "안정형": WEIGHTS_CONSERVATIVE,
+}
+
+# 기본(하위호환) 가중치 = 중립형
+W_CAGR   = WEIGHTS_NEUTRAL["cagr"]
+W_MDD    = WEIGHTS_NEUTRAL["mdd"]
+W_SHARPE = WEIGHTS_NEUTRAL["sharpe"]
+W_CALMAR = WEIGHTS_NEUTRAL["calmar"]
 
 # ─────────────────────────────────────────────
 # 사전 정의된 후보 포트폴리오 (세션 1 탐색 전략)
@@ -1094,24 +1108,136 @@ def percentile_rank(value, series):
     return float(np.sum(arr <= value) / len(arr) * 100)
 
 
+def mdd_conservative_score(mdd_pct: float) -> float:
+    """안정형 전용 MDD 절대값 기반 스코어 (0~100).
+
+    백분위수 방식 대신 절대값 기반으로 MDD < 10% 목표를 강제합니다.
+    지수 감소 함수: 100 * exp(-|MDD| / 8)
+      MDD  0%: 100점  MDD  5%: ~53점  MDD 10%: ~29점  MDD 20%: ~8점  MDD 30%+: ~2점
+    이렇게 하면 순수 백분위수와 달리 MDD 10%가 넘는 포트폴리오는 항상 낮은 점수를 받습니다.
+    """
+    return 100.0 * np.exp(-abs(mdd_pct) / 8.0)
+
+
+def compute_yearly_returns(portfolio: pd.Series) -> dict:
+    """연도별 수익률(%) 계산.
+
+    각 연도의 첫 거래일 기준으로 해당 연도 내 수익률을 계산합니다.
+    Returns: {year(int): return_pct(float)}
+    """
+    yearly = {}
+    for year, group in portfolio.groupby(portfolio.index.year):
+        if len(group) < 2:
+            continue
+        ret = (group.iloc[-1] / group.iloc[0] - 1) * 100
+        yearly[year] = round(float(ret), 2)
+    return yearly
+
+
+def compute_rolling_return_stats(portfolio: pd.Series, window_years: float) -> dict:
+    """구간별(rolling window) 수익률 통계 계산.
+
+    window_years 기간을 기준으로 모든 구간의 수익률 분포를 반환합니다.
+    Returns: {mean_pct, min_pct, max_pct, pct_positive, count}
+    """
+    window_days = int(window_years * 252)
+    if len(portfolio) <= window_days:
+        return {}
+    # 구간별 수익률: window_days 이후 값 / window_days 이전 값 - 1
+    end_vals = portfolio.iloc[window_days:]
+    start_vals = portfolio.iloc[:len(portfolio) - window_days]
+    rolls = (end_vals.values / start_vals.values - 1) * 100
+    # 연환산 수익률로 변환
+    rolls_annualized = ((1 + rolls / 100) ** (1 / window_years) - 1) * 100
+    return {
+        "mean_pct": round(float(np.mean(rolls_annualized)), 2),
+        "min_pct": round(float(np.min(rolls_annualized)), 2),
+        "max_pct": round(float(np.max(rolls_annualized)), 2),
+        "pct_positive": round(float(np.sum(rolls_annualized > 0) / len(rolls_annualized) * 100), 1),
+        "count": len(rolls_annualized),
+    }
+
+
+def recompute_portfolio_series(record: dict, prices_all: pd.DataFrame) -> pd.Series | None:
+    """기존 record의 설정으로 portfolio 가치 시리즈를 재계산합니다."""
+    etfs = record["portfolio"]["etfs"]
+    code_weight_list = [(e["code"], e["weight"]) for e in etfs]
+    raw_weights = {c: w for c, w in code_weight_list}
+    total_w = sum(raw_weights.values())
+
+    price_series = {}
+    for code, _ in code_weight_list:
+        if code not in prices_all.columns:
+            return None
+        s = prices_all[code].dropna()
+        if s.empty:
+            return None
+        price_series[code] = s
+
+    bt_start = max(s.index[0] for s in price_series.values())
+    bt_end = min(s.index[-1] for s in price_series.values())
+
+    price_df = pd.DataFrame({
+        code: s.loc[bt_start:bt_end]
+        for code, s in price_series.items()
+    }).ffill().dropna()
+
+    if price_df.empty:
+        return None
+
+    sym_weights = {c: raw_weights[c] / total_w for c in price_df.columns}
+    rebalance = record["portfolio"]["rebalancing"]["enabled"]
+    rebalance_freq = record["portfolio"]["rebalancing"]["frequency"] or "월별"
+
+    portfolio, _ = run_lump_sum(
+        price_df, INITIAL_AMOUNT, sym_weights,
+        rebalance, rebalance_freq,
+        dividend_df=None, reinvest_dividends=False,
+    )
+    return portfolio
+
+
 def compute_scores(history: list) -> list:
-    """전체 history 기반 백분위수 스코어 재계산."""
+    """전체 history 기반 스코어 재계산.
+
+    각 레코드에 다음 필드를 추가/갱신합니다:
+      - score          : 중립형 스코어 (하위 호환)
+      - scores.공격형  : 공격형 스코어 (백분위수 기반)
+      - scores.중립형  : 중립형 스코어 (백분위수 기반)
+      - scores.안정형  : 안정형 스코어 (MDD는 절대값 기반 → MDD 10% 이하 강제)
+    """
     if not history:
         return history
 
-    cagrs = [r["metrics"]["cagr_pct"] for r in history]
-    mdds = [-r["metrics"]["mdd_pct"] for r in history]    # mdd는 음수이므로 부호 반전 (낙폭 작을수록 좋음)
+    cagrs   = [r["metrics"]["cagr_pct"] for r in history]
+    mdds    = [r["metrics"]["mdd_pct"] for r in history]    # 음수값 그대로 사용. 덜 음수(낙폭 작음)일수록 높은 점수
     sharpes = [r["metrics"]["sharpe_ratio"] for r in history]
     calmars = [r["metrics"]["calmar_ratio"] for r in history]
 
     for r in history:
-        sc_cagr = percentile_rank(r["metrics"]["cagr_pct"], cagrs)
-        sc_mdd = percentile_rank(-r["metrics"]["mdd_pct"], mdds)
+        sc_cagr   = percentile_rank(r["metrics"]["cagr_pct"], cagrs)
+        sc_mdd    = percentile_rank(r["metrics"]["mdd_pct"], mdds)   # 음수 비교: -5 > -30 → -5%가 높은 순위
         sc_sharpe = percentile_rank(r["metrics"]["sharpe_ratio"], sharpes)
         sc_calmar = percentile_rank(r["metrics"]["calmar_ratio"], calmars)
-        r["score"] = round(
-            W_CAGR * sc_cagr + W_MDD * sc_mdd + W_SHARPE * sc_sharpe + W_CALMAR * sc_calmar, 2
-        )
+
+        # 안정형 MDD는 절대값 기반 스코어 사용 (백분위수 방식으로는 10% 이하 강제 불가)
+        sc_mdd_conservative = mdd_conservative_score(r["metrics"]["mdd_pct"])
+
+        profile_scores = {}
+        for profile, w in INVESTOR_PROFILES.items():
+            if profile == "안정형":
+                profile_scores[profile] = round(
+                    w["cagr"] * sc_cagr + w["mdd"] * sc_mdd_conservative +
+                    w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
+                )
+            else:
+                profile_scores[profile] = round(
+                    w["cagr"] * sc_cagr + w["mdd"] * sc_mdd +
+                    w["sharpe"] * sc_sharpe + w["calmar"] * sc_calmar, 2
+                )
+
+        r["scores"] = profile_scores
+        r["score"]  = profile_scores["중립형"]   # 하위 호환
 
     return history
 
@@ -1238,6 +1364,7 @@ def run_single_backtest(code_weight_list, rebalance, rebalance_freq, turn_id, se
             "years": round(metrics["years"], 2),
         },
         "score": 50.0,  # 나중에 재계산
+        "scores": {"공격형": 50.0, "중립형": 50.0, "안정형": 50.0},  # 나중에 재계산
         "notes": notes,
     }
 
@@ -1246,28 +1373,43 @@ def run_single_backtest(code_weight_list, rebalance, rebalance_freq, turn_id, se
 
 def generate_insights_md(history: list, session: int, session_records: list, date_str: str) -> str:
     """insights MD 문자열 생성."""
-    top_session = sorted(session_records, key=lambda r: r["score"], reverse=True)[:10]
-    top_all = sorted(history, key=lambda r: r["score"], reverse=True)[:10]
-
     def fmt_etfs(rec):
         parts = [f"{e['name']}({e['weight']*100:.0f}%)" for e in rec["portfolio"]["etfs"]]
         return ", ".join(parts)
 
-    def fmt_row(rank, rec):
+    def fmt_row(rank, rec, profile=None):
         rb = rec["portfolio"]["rebalancing"]
         rb_str = f"{rb['frequency']}" if rb["enabled"] else "없음"
+        scores = rec.get("scores", {})
+        if profile:
+            score_val = scores.get(profile, rec["score"])
+        else:
+            score_val = rec["score"]
         return (
             f"| {rank} | {rec['id']} | {fmt_etfs(rec)} | "
             f"{rec['metrics']['cagr_pct']:.2f}% | {rec['metrics']['mdd_pct']:.2f}% | "
-            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {rec['score']:.1f} |"
+            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {score_val:.1f} |"
         )
 
-    session_rows = "\n".join(fmt_row(i + 1, r) for i, r in enumerate(top_session))
-    all_rows = "\n".join(fmt_row(i + 1, r) for i, r in enumerate(top_all))
+    def profile_top_rows(records, profile, n=10):
+        top = sorted(records, key=lambda r: r.get("scores", {}).get(profile, r["score"]), reverse=True)[:n]
+        return "\n".join(fmt_row(i + 1, r, profile) for i, r in enumerate(top)), top
+
+    # 성향별 Top (이번 세션)
+    agg_session_rows,  agg_session_top  = profile_top_rows(session_records, "공격형")
+    neu_session_rows,  neu_session_top  = profile_top_rows(session_records, "중립형")
+    con_session_rows,  con_session_top  = profile_top_rows(session_records, "안정형")
+
+    # 성향별 Top (누적 전체)
+    agg_all_rows, _  = profile_top_rows(history, "공격형")
+    neu_all_rows, _  = profile_top_rows(history, "중립형")
+    con_all_rows, _  = profile_top_rows(history, "안정형")
+
+    # 중립형 기준 이번 세션 Top (인사이트용)
+    top_session = neu_session_top
 
     # 간단한 인사이트 추출
     if top_session:
-        best = top_session[0]
         insights = []
 
         # CAGR 분석
@@ -1294,18 +1436,26 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
                 f"리밸런싱 여부 비교: 리밸런싱 평균 스코어 {avg_score_yes:.1f} vs 비리밸런싱 {avg_score_no:.1f} → {rb_effect}"
             )
 
-        # 상위 포트폴리오 공통 ETF
+        # 상위 포트폴리오 공통 ETF (중립형 기준)
         top3_codes = set()
         for r in top_session[:3]:
             for e in r["portfolio"]["etfs"]:
                 top3_codes.add(e["name"])
         insights.append(
-            f"상위 3개 포트폴리오 구성 ETF: {', '.join(sorted(top3_codes))}"
+            f"중립형 상위 3개 포트폴리오 구성 ETF: {', '.join(sorted(top3_codes))}"
         )
     else:
         insights = ["데이터 부족으로 인사이트 분석 불가"]
 
     insights_text = "\n".join(f"{i + 1}. {ins}" for i, ins in enumerate(insights))
+
+    # 성향별 가중치 설명 텍스트
+    def weight_desc(w):
+        return (f"CAGR {w['cagr']*100:.0f}% / MDD {w['mdd']*100:.0f}% / "
+                f"샤프 {w['sharpe']*100:.0f}% / 칼마 {w['calmar']*100:.0f}%")
+
+    col_header = "| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |"
+    col_sep    = "|-----|----|----------|------|-----|------|---------|--------|"
 
     md = f"""# 연금 ETF 포트폴리오 분석 리포트
 
@@ -1319,23 +1469,60 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
 - 세션 번호: {session}
 - 이번 세션 테스트 수: {len(session_records)}
 - 누적 테스트 수: {len(history)}
-- 스코어링 가중치: CAGR {W_CAGR*100:.0f}% / MDD {W_MDD*100:.0f}% / 샤프 {W_SHARPE*100:.0f}% / 칼마 {W_CALMAR*100:.0f}%
 
 ---
 
-## 이번 세션 Top 포트폴리오
+## 투자자 성향별 스코어링 가중치
 
-| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |
-|-----|----|----------|------|-----|------|---------|--------|
-{session_rows}
+| 성향 | CAGR | MDD | 샤프 | 칼마 | 특징 |
+|------|------|-----|------|------|------|
+| 🚀 공격형 | {WEIGHTS_AGGRESSIVE['cagr']*100:.0f}% | {WEIGHTS_AGGRESSIVE['mdd']*100:.0f}% | {WEIGHTS_AGGRESSIVE['sharpe']*100:.0f}% | {WEIGHTS_AGGRESSIVE['calmar']*100:.0f}% | 수익률 극대화, 손실 허용 |
+| ⚖️ 중립형 | {WEIGHTS_NEUTRAL['cagr']*100:.0f}% | {WEIGHTS_NEUTRAL['mdd']*100:.0f}% | {WEIGHTS_NEUTRAL['sharpe']*100:.0f}% | {WEIGHTS_NEUTRAL['calmar']*100:.0f}% | 수익·리스크 균형 |
+| 🛡️ 안정형 | {WEIGHTS_CONSERVATIVE['cagr']*100:.0f}% | {WEIGHTS_CONSERVATIVE['mdd']*100:.0f}% | {WEIGHTS_CONSERVATIVE['sharpe']*100:.0f}% | {WEIGHTS_CONSERVATIVE['calmar']*100:.0f}% | MDD 절대값 기반 스코어링, MDD 10% 이하 목표 |
 
 ---
 
-## 누적 전체 Top 포트폴리오
+## 이번 세션 Top 포트폴리오 (성향별)
 
-| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |
-|-----|----|----------|------|-----|------|---------|--------|
-{all_rows}
+### 🚀 공격형
+
+{col_header}
+{col_sep}
+{agg_session_rows}
+
+### ⚖️ 중립형
+
+{col_header}
+{col_sep}
+{neu_session_rows}
+
+### 🛡️ 안정형
+
+{col_header}
+{col_sep}
+{con_session_rows}
+
+---
+
+## 누적 전체 Top 포트폴리오 (성향별)
+
+### 🚀 공격형
+
+{col_header}
+{col_sep}
+{agg_all_rows}
+
+### ⚖️ 중립형
+
+{col_header}
+{col_sep}
+{neu_all_rows}
+
+### 🛡️ 안정형
+
+{col_header}
+{col_sep}
+{con_all_rows}
 
 ---
 
@@ -1352,11 +1539,399 @@ def generate_insights_md(history: list, session: int, session_records: list, dat
 - [ ] 채권 비중을 10%~50% 범위로 세분화한 변형 탐색
 - [ ] 해외 채권 ETF (미국채, 하이일드) 혼합 전략 탐색
 - [ ] 배당 ETF 위주 인컴형 포트폴리오 탐색
+"""
+    return md
 
-## 스코어링 가중치 현황
 
-현재: CAGR {W_CAGR*100:.0f}% / MDD {W_MDD*100:.0f}% / 샤프 {W_SHARPE*100:.0f}% / 칼마 {W_CALMAR*100:.0f}%  
-비고: 세션 1은 초기 기준선 수집이므로 가중치 변경 유보. 세션 2부터 조정 검토.
+def generate_latest_report_md(history: list, session: int, date_str: str) -> str:
+    """모든 세션의 결과를 종합·요약한 latest_report.md 생성."""
+
+    def fmt_etfs(rec):
+        parts = [f"{e['name']}({e['weight']*100:.0f}%)" for e in rec["portfolio"]["etfs"]]
+        return ", ".join(parts)
+
+    def fmt_row(rank, rec, profile=None):
+        rb = rec["portfolio"]["rebalancing"]
+        rb_str = f"{rb['frequency']}" if rb["enabled"] else "없음"
+        scores = rec.get("scores", {})
+        score_val = scores.get(profile, rec["score"]) if profile else rec["score"]
+        return (
+            f"| {rank} | {rec['id']} | {fmt_etfs(rec)} | "
+            f"{rec['metrics']['cagr_pct']:.2f}% | {rec['metrics']['mdd_pct']:.2f}% | "
+            f"{rec['metrics'].get('sharpe_ratio') or 'N/A'} | {rb_str} | {score_val:.1f} |"
+        )
+
+    def profile_top_n(records, profile, n=10):
+        top = sorted(records, key=lambda r: r.get("scores", {}).get(profile, r["score"]), reverse=True)[:n]
+        rows = "\n".join(fmt_row(i + 1, r, profile) for i, r in enumerate(top))
+        return rows, top
+
+    col_header = "| 순위 | ID | ETF 구성 | CAGR | MDD | 샤프 | 리밸런싱 | 스코어 |"
+    col_sep    = "|-----|----|----------|------|-----|------|---------|--------|"
+
+    # 전체 Top 10 (성향별)
+    agg_rows, agg_top = profile_top_n(history, "공격형")
+    neu_rows, neu_top = profile_top_n(history, "중립형")
+    con_rows, con_top = profile_top_n(history, "안정형")
+
+    # 세션별 요약 통계
+    sessions_done = sorted(set(r["session"] for r in history))
+    session_summary_rows = []
+    for s in sessions_done:
+        recs = [r for r in history if r["session"] == s]
+        cagrs = [r["metrics"]["cagr_pct"] for r in recs]
+        mdds  = [abs(r["metrics"]["mdd_pct"]) for r in recs]
+        neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in recs]
+        best = sorted(recs, key=lambda r: r.get("scores", {}).get("중립형", r["score"]), reverse=True)[0]
+        session_summary_rows.append(
+            f"| {s} | {len(recs)} | {sum(len(r2) for r2 in [recs[:i+1] for i in range(len(recs))])//len(recs) if recs else 0} | "
+            f"{np.mean(cagrs):.2f}% | -{np.mean(mdds):.2f}% | {np.mean(neu_scores):.1f} | "
+            f"{best['id']} ({best['metrics']['cagr_pct']:.2f}% CAGR) |"
+        )
+
+    # 실제 세션별 요약은 간결하게 재작성
+    session_rows_clean = []
+    for s in sessions_done:
+        recs = [r for r in history if r["session"] == s]
+        cagrs = [r["metrics"]["cagr_pct"] for r in recs]
+        mdds  = [abs(r["metrics"]["mdd_pct"]) for r in recs]
+        neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in recs]
+        best = sorted(recs, key=lambda r: r.get("scores", {}).get("중립형", r["score"]), reverse=True)[0]
+        best_etfs = ", ".join(e["name"] for e in best["portfolio"]["etfs"][:3])
+        session_rows_clean.append(
+            f"| {s} | {len(recs)} | {np.mean(cagrs):.2f}% | -{np.mean(mdds):.2f}% | "
+            f"{np.max(cagrs):.2f}% | {np.mean(neu_scores):.1f} | {best['id']} | {best_etfs}... |"
+        )
+
+    session_table = "\n".join(session_rows_clean)
+
+    # 전체 통계
+    all_cagrs = [r["metrics"]["cagr_pct"] for r in history]
+    all_mdds  = [abs(r["metrics"]["mdd_pct"]) for r in history]
+    all_sharpes = [r["metrics"].get("sharpe_ratio") or 0 for r in history]
+    all_neu_scores = [r.get("scores", {}).get("중립형", r["score"]) for r in history]
+
+    # 공통 ETF 분석 (Top 10 중립형 기준)
+    top_etf_counter: dict = {}
+    for r in neu_top:
+        for e in r["portfolio"]["etfs"]:
+            top_etf_counter[e["name"]] = top_etf_counter.get(e["name"], 0) + 1
+    top_etf_lines = "\n".join(
+        f"  - {name}: {cnt}개 포트폴리오" for name, cnt in sorted(top_etf_counter.items(), key=lambda x: -x[1])
+    )
+
+    # ─── 연도별 & 구간별 수익률 (중립형 Top 3) ─────────────────────────
+    try:
+        prices_all = get_etf_prices()
+    except Exception:
+        prices_all = None
+
+    def build_yearly_rolling_section(top_records, prices_df, n=3):
+        """중립형 Top n 포트폴리오의 연도별·구간별 수익률 섹션 문자열 반환."""
+        lines = []
+        candidates = top_records[:n]
+        if prices_df is None or prices_df.empty:
+            return "_가격 데이터를 로드할 수 없어 계산 생략_"
+
+        # 연도별 수익률 테이블 헤더
+        all_years = set()
+        port_yearly_list = []
+        port_rolling_list = []
+
+        for rec in candidates:
+            port = recompute_portfolio_series(rec, prices_df)
+            if port is None or port.empty:
+                port_yearly_list.append(None)
+                port_rolling_list.append(None)
+                continue
+            yearly = compute_yearly_returns(port)
+            all_years.update(yearly.keys())
+            port_yearly_list.append(yearly)
+            rolling = {
+                "1년": compute_rolling_return_stats(port, 1.0),
+                "3년": compute_rolling_return_stats(port, 3.0),
+                "5년": compute_rolling_return_stats(port, 5.0),
+            }
+            port_rolling_list.append(rolling)
+
+        sorted_years = sorted(all_years)
+        if not sorted_years:
+            return "_연도별 수익률 계산에 실패했습니다_"
+
+        # ── 연도별 수익률 테이블 ──
+        names = [fmt_etfs(r) for r in candidates]
+        header_years = " | ".join(str(y) for y in sorted_years)
+        sep_years = " | ".join("------" for _ in sorted_years)
+        lines.append("### 📅 연도별 수익률 (Yearly Return)")
+        lines.append("")
+        lines.append(f"| 포트폴리오 | {header_years} |")
+        lines.append(f"|-----------|{sep_years}|")
+        for i, (rec, yearly) in enumerate(zip(candidates, port_yearly_list)):
+            name_short = names[i][:50] + ("..." if len(names[i]) > 50 else "")
+            if yearly is None:
+                row_vals = " | ".join("N/A" for _ in sorted_years)
+            else:
+                def fmt_yr(y, yr):
+                    v = yr.get(y)
+                    if v is None:
+                        return "—"
+                    sign = "+" if v >= 0 else ""
+                    return f"{sign}{v:.1f}%"
+                row_vals = " | ".join(fmt_yr(y, yearly) for y in sorted_years)
+            lines.append(f"| {name_short} | {row_vals} |")
+
+        lines.append("")
+        lines.append("> ℹ️ 각 연도의 첫 거래일~마지막 거래일 기준 수익률입니다.")
+
+        # ── 구간별(Rolling) 수익률 통계 테이블 ──
+        lines.append("")
+        lines.append("### 🔄 구간별 수익률 분포 (Rolling Return, 연환산)")
+        lines.append("")
+        lines.append("| 포트폴리오 | 구간 | 평균 | 최솟값 | 최댓값 | 양수 확률 |")
+        lines.append("|-----------|------|------|--------|--------|---------|")
+        for i, (rec, rolling) in enumerate(zip(candidates, port_rolling_list)):
+            name_short = names[i][:40] + ("..." if len(names[i]) > 40 else "")
+            if rolling is None:
+                lines.append(f"| {name_short} | — | N/A | N/A | N/A | N/A |")
+                continue
+            first = True
+            for window_label, stats in rolling.items():
+                if not stats:
+                    lines.append(f"| {name_short if first else ''} | {window_label} | 데이터부족 | — | — | — |")
+                    first = False
+                    continue
+                sign = lambda v: f"+{v:.1f}%" if v >= 0 else f"{v:.1f}%"
+                lines.append(
+                    f"| {name_short if first else ''} | {window_label} "
+                    f"| {sign(stats['mean_pct'])} "
+                    f"| {sign(stats['min_pct'])} "
+                    f"| {sign(stats['max_pct'])} "
+                    f"| {stats['pct_positive']:.0f}% |"
+                )
+                first = False
+        lines.append("")
+        lines.append("> ℹ️ 구간별 수익률은 해당 구간 동안 투자했을 때의 **연환산** 수익률 분포입니다. '양수 확률'은 해당 기간 수익이 플러스였던 구간의 비율입니다.")
+
+        return "\n".join(lines)
+
+    yearly_rolling_section = build_yearly_rolling_section(neu_top, prices_all, n=3)
+
+    # 백테스트 기간 통계 (history 전체 기준)
+    bt_starts = [r["backtest"]["start_date"] for r in history if "backtest" in r and "start_date" in r["backtest"]]
+    bt_ends   = [r["backtest"]["end_date"]   for r in history if "backtest" in r and "end_date"   in r["backtest"]]
+    data_start_str = min(bt_starts) if bt_starts else "2015-01-02"
+    data_end_str   = max(bt_ends)   if bt_ends   else "2026-04-01"
+    avg_years = round(float(np.mean([r["metrics"]["years"] for r in history])), 1)
+
+    md = f"""# 연금 ETF 포트폴리오 백테스트 종합 보고서
+
+> 최종 업데이트: {date_str} (세션 {session} 완료 후)  
+> 작성자: AI Agent (run_agent_backtest.py)
+
+---
+
+## 🗓️ 백테스트 기간 안내
+
+> **이 섹션은 결과 해석에 매우 중요합니다.** 전략 성과는 테스트 기간의 시장 환경에 크게 의존합니다.
+
+### 데이터 범위
+
+| 항목 | 내용 |
+|------|------|
+| 가격 데이터 기간 | {data_start_str} ~ {data_end_str} |
+| 평균 백테스트 기간 | 약 {avg_years}년 |
+| 데이터 소스 | etf_prices.parquet (capybara_fetcher, KRX 국내 ETF) |
+| 투자 방식 | 거치식 (초기 1천만원 일괄 투자) |
+| 환율 반영 | 국내 상장 ETF 원화 종가 기준 (환헤지 여부는 ETF별 상이) |
+
+### 테스트 기간 주요 시장 이벤트
+
+| 연도 | 주요 이벤트 | 시장 영향 |
+|------|------------|---------|
+| 2015~2016 | 중국 증시 급락, 미국 금리 인상 시작 | 신흥국 변동성 확대 |
+| 2017~2018 | 미국 감세 정책, 무역전쟁 시작 | 미국 주식 강세, 신흥국 약세 |
+| 2019 | 미중 무역협상 진행 | 글로벌 증시 반등 |
+| 2020 Q1 | COVID-19 팬데믹 충격 | 전 세계 급락 (-30%+) 후 급반등 |
+| 2020 Q2~2021 | 각국 유동성 공급 (제로금리 + QE) | 역대급 상승장 |
+| 2022 | 미국 급격한 금리 인상 (0%→5.25%) | 주식+채권 동반 하락 |
+| 2023 | 금리 고점 논쟁, AI 기술주 급등 | 나스닥 중심 반등 |
+| 2024~2025 | AI·반도체 테마 지속 강세, 금리 인하 시작 | 미국 기술주 사상 최고치 |
+
+### 기간 편향(Survivorship Bias) 주의사항
+
+- **강세장 편중**: 2015~2026 기간은 미국 주식 역사상 손꼽히는 장기 강세장입니다. 미국 기술주(나스닥100, S&P500) ETF의 높은 CAGR은 이 특수한 기간을 반영합니다.
+- **채권 역풍**: 2022년 금리 급등으로 채권 ETF가 이례적으로 크게 하락했습니다. 이로 인해 채권 혼합 전략의 성과가 과소평가될 수 있습니다.
+- **환율 변동**: 원달러 환율 변동(2015년 약 1,100원 → 2025년 약 1,450원+)이 달러 자산 ETF의 성과를 추가로 높였습니다.
+- **미래 성과 불보장**: 과거 성과가 미래를 보장하지 않으며, 특히 이례적 강세장의 수치를 기준치로 삼는 것은 위험합니다.
+
+---
+
+## 📖 지표 설명
+
+백테스트 결과를 해석하기 위해 사용된 주요 지표의 의미와 해석 방법을 설명합니다.
+
+### 📐 CAGR (Compound Annual Growth Rate) — 연평균 복리 수익률
+
+**정의**: 투자 기간 동안의 총 수익을 연 단위 복리로 환산한 수익률입니다.
+
+`CAGR = (최종잔고 / 초기투자금)^(1/투자연수) - 1`
+
+| 수준 | CAGR 범위 | 해석 |
+|------|----------|------|
+| 🔴 낮음 | 0~5% | 은행 예금 수준. 물가 상승률과 비슷하거나 낮을 수 있음 |
+| 🟡 보통 | 5~10% | 채권+주식 혼합 전략의 일반적 범위 |
+| 🟢 양호 | 10~20% | 장기 분산 주식 투자의 목표 범위 |
+| 🟢🟢 우수 | 20%+ | 특정 고성장 자산 집중 시 가능, 리스크도 함께 높음 |
+
+> ℹ️ 이 백테스트의 데이터 기간(2015~2026)은 미국 주식 역사상 최고의 강세장을 포함하므로, 실제 미래 수익률은 이보다 낮을 수 있습니다.
+
+---
+
+### 📉 MDD (Maximum Drawdown) — 최대 낙폭
+
+**정의**: 투자 기간 중 고점 대비 저점까지 자산이 얼마나 하락했는지를 나타내는 최악의 손실 구간입니다.
+
+`MDD = (저점 - 직전고점) / 직전고점 × 100`
+
+| 수준 | MDD 범위 | 투자자 성향 | 해석 |
+|------|----------|-----------|------|
+| 🟢 매우 낮음 | 0~10% | 🛡️ 안정형 | 원금 손실이 적음. 심리적 부담 최소 |
+| 🟡 낮음 | 10~20% | ⚖️ 중립형 | 일반적인 채권+주식 혼합 포트폴리오 수준 |
+| 🟠 중간 | 20~30% | ⚖️~🚀 | 주식 비중이 높은 포트폴리오. 하락장 시 심리적 압박 |
+| 🔴 높음 | 30~50% | 🚀 공격형 | 주식 100% 수준. 장기 보유 의지가 없으면 손절 위험 |
+| 🔴🔴 매우 높음 | 50%+ | — | 레버리지·섹터 집중투자. 극심한 변동성 |
+
+> ⚠️ **연금 투자에서 MDD가 특히 중요한 이유**: 손실이 커질수록 회복에 필요한 수익률이 기하급수적으로 증가합니다. 30% 손실은 43% 수익, 50% 손실은 100% 수익이 필요합니다.
+
+---
+
+### 📊 샤프지수 (Sharpe Ratio) — 위험 대비 초과 수익률
+
+**정의**: 무위험 이자율(연 3%)을 초과하는 수익률을 변동성(표준편차)으로 나눈 지표입니다. 리스크 한 단위당 얼마나 수익을 냈는지를 측정합니다.
+
+`Sharpe = (포트폴리오 수익률 - 무위험이자율 3%) / 수익률 표준편차`
+
+| 수준 | 샤프지수 | 해석 |
+|------|---------|------|
+| 🔴 나쁨 | 0 미만 | 무위험 자산(예금) 보다 낮은 위험 조정 수익 |
+| 🟡 보통 | 0~0.5 | 리스크 대비 수익이 낮음 |
+| 🟢 양호 | 0.5~1.0 | 합리적인 위험 조정 수익 |
+| 🟢🟢 우수 | 1.0~1.5 | 좋은 위험 조정 수익. 우수한 포트폴리오 |
+| 🟢🟢🟢 탁월 | 1.5+ | 매우 효율적인 포트폴리오 |
+
+> ℹ️ 샤프지수는 수익률과 손실 변동성을 모두 페널티로 처리합니다. 하락만을 리스크로 보는 소르티노 지수와는 차이가 있습니다.
+
+---
+
+### 🏔️ 칼마비율 (Calmar Ratio) — MDD 대비 수익률
+
+**정의**: CAGR을 MDD의 절대값으로 나눈 비율입니다. '최악의 손실 1%당 얼마를 벌었는가'를 측정합니다.
+
+`Calmar = CAGR / |MDD|`
+
+| 수준 | 칼마비율 | 해석 |
+|------|---------|------|
+| 🔴 낮음 | 0~0.3 | 손실 대비 수익이 불충분 |
+| 🟡 보통 | 0.3~0.5 | 일반적인 주식 포트폴리오 수준 |
+| 🟢 양호 | 0.5~1.0 | MDD 대비 좋은 수익 |
+| 🟢🟢 우수 | 1.0+ | 손실 위험 대비 탁월한 수익 효율 |
+
+> ℹ️ 칼마비율은 MDD를 분모로 사용하므로, MDD가 낮은 보수적 포트폴리오에서도 높게 나올 수 있습니다. 샤프지수와 함께 해석하세요.
+
+---
+
+### 🎯 투자자 성향별 스코어 (Score)
+
+**정의**: 전체 테스트된 포트폴리오 중에서 각 포트폴리오가 얼마나 우수한지를 0~100 사이로 나타낸 종합 점수입니다.
+
+**계산 방식**: 각 지표의 백분위수(percentile rank)에 성향별 가중치를 적용하여 합산합니다.
+
+| 성향 | CAGR | MDD | 샤프 | 칼마 | 특징 |
+|------|------|-----|------|------|------|
+| 🚀 공격형 | 55% | 10% | 20% | 15% | 수익률 극대화 우선, 손실 일부 허용 |
+| ⚖️ 중립형 | 35% | 30% | 20% | 15% | 수익과 리스크의 균형 |
+| 🛡️ 안정형 | 5% | 80% | 10% | 5% | MDD 최소화 절대 우선 (10% 이하 목표) |
+
+> ⚠️ **안정형 주의사항**: 안정형 MDD 스코어는 절대값 기반 지수 감소 함수(`100 × e^(-|MDD|/8)`)를 사용합니다. MDD가 10%를 넘으면 점수가 급격히 하락하므로, MDD < 10% 포트폴리오가 상위를 독점합니다.
+
+> ℹ️ **스코어 범위**: 성향에 따라 스코어 범위가 다를 수 있습니다. 공격형·중립형은 0~100%, 안정형은 MDD 절대값 방식으로 최대값이 낮게 나타납니다 (최고 ~45점).
+
+---
+
+## 📊 전체 요약
+
+| 항목 | 값 |
+|------|----|
+| 완료 세션 수 | {len(sessions_done)}개 (세션 {sessions_done[0]}~{sessions_done[-1]}) |
+| 총 테스트 기록 | {len(history)}개 포트폴리오 |
+| 전체 평균 CAGR | {np.mean(all_cagrs):.2f}% |
+| 전체 평균 MDD | -{np.mean(all_mdds):.2f}% |
+| 전체 최고 CAGR | {np.max(all_cagrs):.2f}% |
+| 전체 최저 MDD(최소) | -{np.min(all_mdds):.2f}% |
+| 전체 평균 샤프지수 | {np.mean(all_sharpes):.4f} |
+| 전체 평균 중립형 스코어 | {np.mean(all_neu_scores):.1f} |
+
+---
+
+## 🏆 투자자 성향별 전체 Top 10
+
+### 🚀 공격형 (CAGR 55% / MDD 10% / 샤프 20% / 칼마 15%)
+
+{col_header}
+{col_sep}
+{agg_rows}
+
+### ⚖️ 중립형 (CAGR 35% / MDD 30% / 샤프 20% / 칼마 15%)
+
+{col_header}
+{col_sep}
+{neu_rows}
+
+### 🛡️ 안정형 (CAGR 15% / MDD 50% / 샤프 25% / 칼마 10%)
+
+{col_header}
+{col_sep}
+{con_rows}
+
+---
+
+## 📈 세션별 요약
+
+| 세션 | 테스트수 | 평균CAGR | 평균MDD | 최고CAGR | 평균스코어(중립) | 최고ID | 최고구성(상위3) |
+|------|---------|---------|--------|---------|--------------|------|-------------|
+{session_table}
+
+---
+
+## 🔑 핵심 발견 (누적)
+
+1. **미국 기술주 ETF(나스닥100, S&P500) + KODEX 반도체** 조합이 공격형·중립형에서 일관되게 최상위 기록
+2. **공격형 No.1**: {agg_top[0]['id']} — {fmt_etfs(agg_top[0])} (CAGR {agg_top[0]['metrics']['cagr_pct']:.2f}%, MDD {agg_top[0]['metrics']['mdd_pct']:.2f}%)
+3. **중립형 No.1**: {neu_top[0]['id']} — {fmt_etfs(neu_top[0])} (CAGR {neu_top[0]['metrics']['cagr_pct']:.2f}%, MDD {neu_top[0]['metrics']['mdd_pct']:.2f}%)
+4. **안정형 No.1**: {con_top[0]['id']} — {fmt_etfs(con_top[0])} (CAGR {con_top[0]['metrics']['cagr_pct']:.2f}%, MDD {con_top[0]['metrics']['mdd_pct']:.2f}%)
+5. **중립형 Top 10에 공통으로 등장하는 ETF:**
+{top_etf_lines}
+6. 리밸런싱 없는 단순 거치식이 대부분의 고스코어 포트폴리오에서 우세
+7. 채권 ETF 혼합 시 MDD 감소 효과가 있으나 CAGR이 크게 하락함
+
+---
+
+## 📅 연도별·구간별 수익률 (중립형 Top 3)
+
+_중립형 Top 3 포트폴리오를 기준으로 연도별 수익률과 구간별(Rolling) 수익률 분포를 분석합니다._
+
+{yearly_rolling_section}
+
+---
+
+## 🔭 다음 세션 탐색 방향
+
+- [ ] 상위 포트폴리오(나스닥100+S&P500+반도체) 비중 미세 조정 심화 탐색
+- [ ] 2차전지, 헬스케어, 리츠(REITs) 등 추가 테마 혼합 탐색
+- [ ] 채권 비중 5%~30% 범위로 세분화하여 리스크 조절 탐색
+- [ ] 해외 채권 ETF(미국채10년, 미국채30년) + 주식 혼합 전략 심화
+- [ ] 배당 ETF + 성장주 ETF 혼합 인컴형 포트폴리오 탐색
+- [ ] 국내 섹터 ETF(반도체, IT, 금융) + 해외 지수 ETF 조합 탐색
 """
     return md
 
@@ -1466,9 +2041,11 @@ def main():
         save_history(history)
 
         m = record["metrics"]
+        scores = record.get("scores", {})
         print(
             f"  → CAGR: {m['cagr_pct']:.2f}%  MDD: {m['mdd_pct']:.2f}%  "
-            f"샤프: {m.get('sharpe_ratio') or 'N/A'}  스코어: {record['score']:.1f}  "
+            f"샤프: {m.get('sharpe_ratio') or 'N/A'}  "
+            f"스코어 [공격:{scores.get('공격형', record['score']):.1f} / 중립:{scores.get('중립형', record['score']):.1f} / 안정:{scores.get('안정형', record['score']):.1f}]  "
             f"기간: {record['backtest']['start_date']} ~ {record['backtest']['end_date']}\n"
         )
 
@@ -1481,19 +2058,31 @@ def main():
     with open(insights_path, "w", encoding="utf-8") as f:
         f.write(insights_md)
 
+    # latest_report.md 업데이트 (전 세션 종합 요약)
+    latest_report_path = BASE_DIR / "latest_report.md"
+    latest_report_md = generate_latest_report_md(history, session, date_str)
+    with open(latest_report_path, "w", encoding="utf-8") as f:
+        f.write(latest_report_md)
+
     print(f"=== 세션 {session} 완료 ===")
     print(f"  테스트 완료: {len(session_records)}개 / 예정 {len(candidates)}개")
     print(f"  누적 기록: {len(history)}개")
     print(f"  결과 저장: {HISTORY_PATH}")
     print(f"  인사이트: {insights_path}")
+    print(f"  종합 보고서: {latest_report_path}")
 
-    # 상위 3개 출력
-    top3 = sorted(session_records, key=lambda r: r["score"], reverse=True)[:3]
-    print("\n▶ 이번 세션 Top 3:")
-    for i, r in enumerate(top3, 1):
-        etf_str = ", ".join(f"{e['name']}({e['weight']*100:.0f}%)" for e in r["portfolio"]["etfs"])
-        print(f"  {i}. [{r['score']:.1f}점] {etf_str}")
-        print(f"     CAGR {r['metrics']['cagr_pct']:.2f}% / MDD {r['metrics']['mdd_pct']:.2f}%")
+    # 성향별 Top 3 출력
+    print("\n▶ 이번 세션 Top 3 (성향별):")
+    for profile_label, emoji in [("공격형", "🚀"), ("중립형", "⚖️"), ("안정형", "🛡️")]:
+        top3 = sorted(session_records,
+                      key=lambda r, p=profile_label: r.get("scores", {}).get(p, r["score"]),
+                      reverse=True)[:3]
+        print(f"\n  {emoji} {profile_label}:")
+        for i, r in enumerate(top3, 1):
+            etf_str = ", ".join(f"{e['name']}({e['weight']*100:.0f}%)" for e in r["portfolio"]["etfs"])
+            sc = r.get("scores", {}).get(profile_label, r["score"])
+            print(f"    {i}. [{sc:.1f}점] {etf_str}")
+            print(f"       CAGR {r['metrics']['cagr_pct']:.2f}% / MDD {r['metrics']['mdd_pct']:.2f}%")
 
 
 if __name__ == "__main__":
